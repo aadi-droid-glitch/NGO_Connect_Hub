@@ -1,0 +1,57 @@
+CREATE TABLE users (
+    email VARCHAR(120) PRIMARY KEY,
+    password VARCHAR(255) NOT NULL,
+    role ENUM('NGO','Volunteer') NOT NULL,
+    name VARCHAR(120) NOT NULL,
+    phone VARCHAR(15)
+);
+
+CREATE TABLE ngos (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(150) UNIQUE,
+    type VARCHAR(100),
+    city VARCHAR(100),
+    description TEXT,
+    email VARCHAR(120),
+    phone VARCHAR(15),
+
+    FOREIGN KEY (email) REFERENCES users(email)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE events (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    ngo_name VARCHAR(150),
+    title VARCHAR(200),
+    date VARCHAR(100),
+    location VARCHAR(200),
+    description TEXT,
+    created_at DATETIME,
+
+    FOREIGN KEY (ngo_name) REFERENCES ngos(name)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE event_volunteers (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    event_id INT,
+    name VARCHAR(120),
+    phone VARCHAR(15),
+    email VARCHAR(120),
+    verified BOOLEAN DEFAULT FALSE,
+    checked_in BOOLEAN DEFAULT FALSE,
+
+    FOREIGN KEY (event_id) REFERENCES events(id)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE ngo_members (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    ngo_name VARCHAR(150),
+    name VARCHAR(120),
+    email VARCHAR(120),
+    phone VARCHAR(15),
+
+    FOREIGN KEY (ngo_name) REFERENCES ngos(name)
+        ON DELETE CASCADE
+);
