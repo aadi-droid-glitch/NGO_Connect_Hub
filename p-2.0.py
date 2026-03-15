@@ -26,6 +26,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime, timezone, timedelta
 import mysql.connector
+import json
 
 # Constants
 ACCENT_COLOR = "#1a73e8"
@@ -49,20 +50,11 @@ def _hash_password(p: str) -> str:
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
-def load_users():
-    conn = connect_db()
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute("SELECT * FROM users")
-    users = cursor.fetchall()
-
-    return users
-
 def connect_db():
     return mysql.connector.connect(
         host="localhost",
         user="root",
-        password="yourpassword",
+        password="cajc",
         database="ngo_connect"
     )
 
@@ -383,9 +375,6 @@ class NGOApp(tk.Tk):
             if not phone.isdigit() or len(phone) != 10:
                 messagebox.showerror("Invalid", "Phone must be exactly 10 digits.")
                 return
-            if email in self.db.get("users", {}):
-                messagebox.showerror("Exists", "An account with that email already exists.")
-                return
 
             conn = connect_db()
             cursor = conn.cursor()
@@ -449,9 +438,7 @@ class NGOApp(tk.Tk):
             if not phone.isdigit() or len(phone) != 10:
                 messagebox.showerror("Invalid", "Phone must be 10 digits.")
                 return
-            if email in self.db.get("users", {}):
-                messagebox.showerror("Exists", "Account already exists.")
-                return
+            
             conn = connect_db()
             cursor = conn.cursor()
 
@@ -514,15 +501,19 @@ class NGOApp(tk.Tk):
         if not evs:
             ttk.Label(parent, text="No upcoming events.", foreground="gray").pack(anchor="w", padx=6)
             return
+        
         new_threshold = datetime.now(timezone.utc) - timedelta(days=3)
+
         for ev in evs:
-            ngo = next((n for n in self.db.get("ngos", []) if n.get("name") == ev.get("ngo")), None)
-            cat = ngo.get("type") if ngo else "Other"
+            cursor.execute("SELECT type FROM ngos WHERE name=%s", (ev["ngo_name"],))
+            ngo = cursor.fetchone()
+            cat = ngo["type"] if ngo else "Other"
+
             created_at = ev.get("created_at")
             is_new = False
             if created_at:
                 try:
-                    dt = datetime.fromisoformat(created_at)
+                    dt = created_at
                     if dt > new_threshold:
                         is_new = True
                 except Exception:
@@ -539,8 +530,8 @@ class NGOApp(tk.Tk):
             if is_new:
                 title = "★ NEW  " + title
             tk.Label(left, text=title, bg=card_bg, font=("Segoe UI", 10, "bold")).pack(anchor="w")
-            tk.Label(left, text=f"{ev['date']} | {ev.get('loc','')} | {cat}", bg=card_bg, fg="gray30").pack(anchor="w")
-            tk.Label(left, text=ev.get("desc", ""), bg=card_bg, wraplength=700, justify="left").pack(anchor="w", pady=(4, 0))
+            tk.Label(left, text=f"{ev['date']} | {ev.get('location','')} | {cat}", bg=card_bg, fg="gray30").pack(anchor="w")
+            tk.Label(left, text=ev.get("description", ""), bg=card_bg, wraplength=700, justify="left").pack(anchor="w", pady=(4, 0))
             ttk.Button(right, text="Open NGO", command=lambda n=ev['ngo_name']: self.show_ngo_detail(n)).pack(fill="x", pady=4)
             tk.Button(right, text="Participate", bg=ACCENT_COLOR, fg="white", bd=0, command=lambda e=ev: self._signup_event_by_obj(e)).pack(fill="x", pady=4)
 
@@ -573,16 +564,11 @@ class NGOApp(tk.Tk):
             """,(my_name,))
         total_vols = cursor.fetchone()["total"]
 
-        ngo_obj = next((n for n in self.db.get("ngos", []) if n.get("name") == my_name), None)
-        total_members = len(ngo_obj.get("members", [])) if ngo_obj else 0
+        cursor.execute("SELECT COUNT(*) AS total FROM ngo_members WHERE ngo_name=%s", (my_name,))
+        total_members = cursor.fetchone()["total"]
 
-        category_counts = {}
-        for ev in self.db.get("events", []):
-            ngo = next((n for n in self.db.get("ngos", []) if n.get("name") == ev.get("ngo")), None)
-            if ngo:
-                cat = ngo.get("type", "Other")
-                category_counts[cat] = category_counts.get(cat, 0) + len(ev.get("volunteers", []))
-        popular = sorted(category_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+        cursor.execute("SELECT n.type, COUNT(ev.id) AS total FROM events e JOIN ngos n ON e.ngo_name = n.name JOIN event_volunteers ev ON ev.event_id = e.id GROUP BY n.type ORDER BY total DESC LIMIT 5")
+        popular = cursor.fetchall()
 
         stats_frame = ttk.Frame(parent)
         stats_frame.pack(fill="x", pady=(0, 8))
@@ -599,7 +585,11 @@ class NGOApp(tk.Tk):
         for ev in events:
             frame = ttk.Frame(parent)
             frame.pack(fill="x", padx=6, pady=6)
-            ttk.Label(frame, text=f"{ev.get('title')} — {ev.get('date')} ({len(ev.get('volunteers', []))} signups)").pack(side="left")
+
+            cursor.execute("SELECT COUNT(*) as total FROM event_volunteers WHERE event_id=%s", (ev["id"],))
+            count = cursor.fetchone()["total"]
+
+            ttk.Label(frame, text=f"{ev.get('title')} — {ev.get('date')} ({count} signups)").pack(side="left")
             ttk.Button(frame, text="Manage", command=lambda e=ev: self.show_volunteer_manager(e)).pack(side="right")
 
     # -----------------------
@@ -643,6 +633,9 @@ class NGOApp(tk.Tk):
         btns.pack(pady=8)
 
         def _set_verified(val: bool):
+            cursor.execute("UPDATE event_volunteers SET verified=%s WHERE email=%s AND event_id=%s", (val, email, event_obj["id"]))
+            conn.commit()
+
             sel = tree.selection()
             if not sel:
                 messagebox.showwarning("Select", "Select a volunteer row.")
@@ -656,6 +649,9 @@ class NGOApp(tk.Tk):
 
 
         def _set_checked(val: bool):
+            cursor.execute("UPDATE event_volunteers SET checked_in=%s WHERE email=%s AND event_id=%s", (val, email, event_obj["id"]))
+            conn.commit()
+            
             sel = tree.selection()
             if not sel:
                 messagebox.showwarning("Select", "Select a volunteer row.")
@@ -721,7 +717,12 @@ class NGOApp(tk.Tk):
         container = ttk.Frame(self.content_frame)
         container.pack(fill="both", expand=True, pady=(8, 0))
         q = (query or "").strip().lower()
-        ngos = list(self.db.get("ngos", []))
+        
+        conn = connect_db()
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute("SELECT * FROM ngos")
+        ngos = cursor.fetchall()
 
         if category and category != "All":
             ngos = [n for n in ngos if n.get("type") == category]
@@ -802,14 +803,18 @@ class NGOApp(tk.Tk):
             if is_new:
                 title = "★ NEW  " + title
             tk.Label(left, text=title, bg=CARD_BG, font=("Segoe UI", 10, "bold")).pack(anchor="w")
-            tk.Label(left, text=f"When: {ev['date']} | Where: {ev.get('loc','')} | Category: {cat}", bg=CARD_BG, fg="gray30").pack(anchor="w")
-            tk.Label(left, text=ev.get("desc", ""), bg=CARD_BG, wraplength=700, justify="left").pack(anchor="w", pady=(4, 0))
+            tk.Label(left, text=f"When: {ev['date']} | Where: {ev.get('location','')} | Category: {cat}", bg=CARD_BG, fg="gray30").pack(anchor="w")
+            tk.Label(left, text=ev.get("description", ""), bg=CARD_BG, wraplength=700, justify="left").pack(anchor="w", pady=(4, 0))
             ttk.Button(right, text="Open in Maps", command=lambda e=ev: open_maps_for(f"{e.get('loc','')} {e.get('title','')}")).pack(fill="x", pady=4)
+            
+            cursor.execute("SELECT COUNT(*) as total FROM event_volunteers WHERE event_id=%s", (ev["id"],))
+            count = cursor.fetchone()["total"]
+            
             if self.current_user.get("role") == "Volunteer":
                 tk.Button(right, text="Participate", bg=ACCENT_COLOR, fg="white", bd=0, command=lambda e=ev: self._signup_event_by_obj(e)).pack(fill="x", pady=4)
                 ttk.Button(right, text="Join NGO", command=lambda n=ev['ngo_name']: self._join_ngo_by_name(n)).pack(fill="x", pady=4)
             else:
-                ttk.Label(right, text=f"Signups: {len(ev.get('volunteers', []))}").pack(pady=6)
+                ttk.Label(right, text=f"Signups: {count}").pack(pady=6)
 
     def show_post_event(self):
         if self.current_user.get("role") != "NGO":
@@ -850,8 +855,7 @@ class NGOApp(tk.Tk):
             if not title or not loc or not date_str:
                 messagebox.showerror("Missing", "Title, Location and Date required.")
                 return
-            ev = {"ngo": self.current_user.get("name"), "title": title, "date": date_str, "loc": loc,
-                  "desc": desc_t.get("1.0", "end").strip(), "volunteers": [], "created_at": now_iso()}
+
             conn = connect_db()
             cursor = conn.cursor()
             cursor.execute("INSERT INTO events (ngo_name,title,date,location,description,created_at) VALUES (%s,%s,%s,%s,%s,NOW())",(self.current_user["name"],title,date_str,loc,desc))
@@ -886,8 +890,8 @@ class NGOApp(tk.Tk):
             right = tk.Frame(card, bg=CARD_BG)
             right.pack(side="right", padx=8, pady=8)
             tk.Label(left, text=f"{ev['title']} — {ev['date']}", bg=CARD_BG, font=("Segoe UI", 10, "bold")).pack(anchor="w")
-            tk.Label(left, text=f"{ev.get('loc', '')}", bg=CARD_BG, fg="gray30").pack(anchor="w")
-            tk.Label(left, text=ev.get("desc", ""), bg=CARD_BG, wraplength=700, justify="left").pack(anchor="w", pady=(4, 0))
+            tk.Label(left, text=f"{ev.get('location', '')}", bg=CARD_BG, fg="gray30").pack(anchor="w")
+            tk.Label(left, text=ev.get("description", ""), bg=CARD_BG, wraplength=700, justify="left").pack(anchor="w", pady=(4, 0))
             ttk.Button(right, text="View Volunteers", command=lambda e=ev: self.show_volunteer_manager(e)).pack(pady=4)
             ttk.Button(right, text="Open in Maps", command=lambda e=ev: open_maps_for(f"{e.get('loc','')} {e.get('title','')}")).pack(pady=4)
 
@@ -895,11 +899,7 @@ class NGOApp(tk.Tk):
     # Signup and Join helpers
     # -----------------------
     def _signup_event_by_obj(self, ev_obj):
-        for i, e in enumerate(self.db.get("events", [])):
-            if e.get("title") == ev_obj.get("title") and e.get("ngo") == ev_obj.get("ngo"):
-                self._signup_event(i)
-                return
-        messagebox.showerror("Error", "Event not found.")
+        self._signup_event(ev_obj["id"])
 
     def _signup_event(self, event_id):
         if self.current_user.get("role") != "Volunteer":
@@ -908,6 +908,11 @@ class NGOApp(tk.Tk):
 
         conn = connect_db()
         cursor = conn.cursor(dictionary=True)
+
+        cursor.execute("SELECT id FROM event_volunteers WHERE event_id=%s AND email=%s", (event_id, self.current_user["email"]))
+        if cursor.fetchone():
+            messagebox.showinfo("Already Joined", "You already joined this event.")
+            return
 
         cursor.execute("INSERT INTO event_volunteers(event_id,name,phone,email,verified,checked_in) VALUES (%s,%s,%s,%s,%s,%s)",(event_id, self.current_user["name"], self.current_user["phone"], self.current_user["email"], False, False))
         conn.commit()    
@@ -942,7 +947,12 @@ class NGOApp(tk.Tk):
         messagebox.showinfo("Joined", f"You joined {ngo_obj.get('name')} as a member.")
 
     def _join_ngo_by_name(self, name):
-        ngo = next((n for n in self.db.get("ngos", []) if n.get("name") == name), None)
+        conn = connect_db()
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute("SELECT * FROM ngos WHERE name=%s", (name,))
+        ngo = cursor.fetchone()
+
         if not ngo:
             messagebox.showerror("Not found", "NGO not found.")
             return
@@ -958,18 +968,23 @@ class NGOApp(tk.Tk):
         container = ttk.Frame(self.content_frame)
         container.pack(fill="both", expand=True)
         found = 0
-        for ngo in self.db.get("ngos", []):
-            if any(m.get("email") == my_email for m in ngo.get("members", [])):
-                found += 1
-                card = tk.Frame(container, bg=CARD_BG, bd=1, relief="solid")
-                card.pack(fill="x", padx=6, pady=6)
-                left = tk.Frame(card, bg=CARD_BG)
-                left.pack(side="left", fill="both", expand=True, padx=8, pady=8)
-                right = tk.Frame(card, bg=CARD_BG)
-                right.pack(side="right", padx=8, pady=8)
-                tk.Label(left, text=f"{ngo['name']} — {ngo.get('type','')}", bg=CARD_BG, font=("Segoe UI", 10, "bold")).pack(anchor="w")
-                tk.Label(left, text=ngo.get("desc", ""), bg=CARD_BG, wraplength=700, justify="left").pack(anchor="w", pady=(4, 0))
-                ttk.Button(right, text="View Events", command=lambda n=ngo['name']: self.show_events(filter_ngo=n)).pack(fill="x", pady=4)
+
+        conn = connect_db()
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute("SELECT n.* FROM ngos n JOIN ngo_members m ON n.name = m.ngo_name WHERE m.email=%s", (my_email,))
+        ngos = cursor.fetchall()
+        for ngo in ngos:
+            found += 1
+            card = tk.Frame(container, bg=CARD_BG, bd=1, relief="solid")
+            card.pack(fill="x", padx=6, pady=6)
+            left = tk.Frame(card, bg=CARD_BG)
+            left.pack(side="left", fill="both", expand=True, padx=8, pady=8)
+            right = tk.Frame(card, bg=CARD_BG)
+            right.pack(side="right", padx=8, pady=8)
+            tk.Label(left, text=f"{ngo['name']} — {ngo.get('type','')}", bg=CARD_BG, font=("Segoe UI", 10, "bold")).pack(anchor="w")
+            tk.Label(left, text=ngo.get("desc", ""), bg=CARD_BG, wraplength=700, justify="left").pack(anchor="w", pady=(4, 0))
+            ttk.Button(right, text="View Events", command=lambda n=ngo['name']: self.show_events(filter_ngo=n)).pack(fill="x", pady=4)
         if found == 0:
             ttk.Label(container, text="You haven't joined any NGOs yet.", foreground="gray").pack(pady=20)
 
@@ -1098,6 +1113,8 @@ class NGOApp(tk.Tk):
         ttk.Button(actions, text="Cancel", command=lambda: self.show_home()).pack(side="left")
 
     def _show_vols(self, event_obj):
+        conn = connect_db()
+        cursor = conn.cursor()
         cursor.execute("SELECT name,phone,email,verified,checked_in FROM event_volunteers WHERE event_id=%s", (event_obj["id"],))
         vols = cursor.fetchall()
         
