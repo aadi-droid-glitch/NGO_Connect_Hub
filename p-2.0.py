@@ -14,8 +14,6 @@ Features:
 - Data persisted to ngodata.json (users, ngos, events)
 - Uses only Python standard library: tkinter, ttk, json, datetime, urllib, webbrowser, hashlib, calendar"""
 
-
-import os
 import math
 import calendar
 import urllib.request
