@@ -14,6 +14,7 @@ Features:
 - Data persisted to ngodata.json (users, ngos, events)
 - Uses only Python standard library: tkinter, ttk, json, datetime, urllib, webbrowser, hashlib, calendar"""
 
+
 import math
 import calendar
 import urllib.request
@@ -33,8 +34,9 @@ CARD_BG = "#ffffff"
 
 CATEGORIES = [
     "Food", "Education", "Health", "Environment", "Shelter",
-    "Women & Children", "Elderly Care", "Climate Action",
-    "Animal Welfare", "Skill Development", "Other"
+    "Women Empowerment", "Child Care", "Elderly Care", "Climate Action",
+    "Animal Welfare", "Skill Development", "Disaster Relief", 
+    "Community Development", "Mental Health", "Other"
 ]
 
 
@@ -52,7 +54,7 @@ def connect_db():
     return mysql.connector.connect(
         host="localhost",
         user="root",
-        password="cajc",
+        password="1983",
         database="ngo_connect"
     )
 
@@ -341,16 +343,10 @@ class NGOApp(tk.Tk):
         email_e = field("Contact Email:", 3)
         phone_e = field("Phone (10 digits):", 4)
         pw_e = field("Password:", 5)
+
         ttk.Label(form, text="Description:").grid(row=6, column=0, sticky="ne", padx=6, pady=6)
         desc_t = tk.Text(form, width=48, height=4)
         desc_t.grid(row=6, column=1, padx=6, pady=6, sticky="w")
-
-        ttk.Label(form, text="Latitude (optional):").grid(row=7, column=0, sticky="e", padx=6, pady=6)
-        lat_e = ttk.Entry(form, width=24)
-        lat_e.grid(row=7, column=1, sticky="w", padx=6, pady=6)
-        ttk.Label(form, text="Longitude (optional):").grid(row=8, column=0, sticky="e", padx=6, pady=6)
-        lon_e = ttk.Entry(form, width=24)
-        lon_e.grid(row=8, column=1, sticky="w", padx=6, pady=6)
 
         actions = ttk.Frame(self.content_frame)
         actions.pack(pady=8)
@@ -367,9 +363,11 @@ class NGOApp(tk.Tk):
             if not name or not cat or not city or not email or not phone or not pw:
                 messagebox.showerror("Missing", "Please fill all required fields.")
                 return
+            
             if "@" not in email or "." not in email:
                 messagebox.showerror("Invalid", "Please enter a valid email.")
                 return
+            
             if not phone.isdigit() or len(phone) != 10:
                 messagebox.showerror("Invalid", "Phone must be exactly 10 digits.")
                 return
@@ -383,8 +381,16 @@ class NGOApp(tk.Tk):
                 conn.close()
                 return
 
-            cursor.execute("INSERT INTO users (email,password,role,name,phone) VALUES (%s,%s,%s,%s,%s)",(email,_hash_password(pw),"NGO",name,phone))
-            cursor.execute("INSERT INTO ngos (name,type,city,description,email,phone) VALUES (%s,%s,%s,%s,%s,%s)",(name,cat,city,desc,email,phone))
+            cursor.execute(
+                "INSERT INTO users (email,password,role,name,phone) VALUES (%s,%s,%s,%s,%s)",
+                (email,_hash_password(pw),"NGO",name,phone)
+            )
+
+            cursor.execute(
+                "INSERT INTO ngos (name,type,city,description,email,phone) VALUES (%s,%s,%s,%s,%s,%s)",
+                (name,cat,city,desc,email,phone)
+            )
+
             conn.commit()
 
             messagebox.showinfo("Registered", "NGO registered successfully. Please login.")
@@ -394,7 +400,9 @@ class NGOApp(tk.Tk):
         ttk.Button(actions, text="Back", command=lambda: self.show_login()).pack(side="left")
 
     def show_register_volunteer(self):
+        
         self.clear_content()
+        
         ttk.Label(self.content_frame, text="Volunteer Sign Up — NGO Connect Hub", font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(0, 8))
         form = ttk.Frame(self.content_frame)
         form.pack(anchor="w", pady=6)
@@ -402,21 +410,18 @@ class NGOApp(tk.Tk):
         ttk.Label(form, text="Full Name:").grid(row=0, column=0, sticky="e", padx=6, pady=6)
         name_e = ttk.Entry(form, width=48)
         name_e.grid(row=0, column=1, padx=6, pady=6)
+        
         ttk.Label(form, text="Email:").grid(row=1, column=0, sticky="e", padx=6, pady=6)
         email_e = ttk.Entry(form, width=48)
         email_e.grid(row=1, column=1, padx=6, pady=6)
+        
         ttk.Label(form, text="Phone (10 digits):").grid(row=2, column=0, sticky="e", padx=6, pady=6)
         phone_e = ttk.Entry(form, width=48)
         phone_e.grid(row=2, column=1, padx=6, pady=6)
+        
         ttk.Label(form, text="Password:").grid(row=3, column=0, sticky="e", padx=6, pady=6)
         pw_e = ttk.Entry(form, show="*", width=48)
         pw_e.grid(row=3, column=1, padx=6, pady=6)
-
-        ttk.Label(form, text="Follow categories (ctrl-click to multi):").grid(row=4, column=0, sticky="ne", padx=6, pady=6)
-        listbox = tk.Listbox(form, selectmode="multiple", height=6, exportselection=0)
-        for c in CATEGORIES:
-            listbox.insert("end", c)
-        listbox.grid(row=4, column=1, padx=6, pady=6, sticky="w")
 
         actions = ttk.Frame(self.content_frame)
         actions.pack(pady=8)
@@ -483,11 +488,9 @@ class NGOApp(tk.Tk):
     # -----------------------
     def _render_vol_home(self, parent):
         ttk.Label(parent, text="Volunteer Dashboard", font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(0, 8))
-        follows = self.current_user.get("follows", [])
         frame = ttk.Frame(parent)
         frame.pack(fill="x")
-        ttk.Label(frame, text="Followed categories: " + (", ".join(follows) if follows else "None")).pack(side="left", padx=6)
-        ttk.Button(frame, text="Edit Follows", command=lambda: self.show_profile()).pack(side="left", padx=6)
+        ttk.Label(frame, text="All categories followed: ").pack(side="left", padx=6)
 
         ttk.Label(parent, text="Upcoming Events", font=("Segoe UI", 12)).pack(anchor="w", pady=(6, 4))
         conn = connect_db()
@@ -511,13 +514,13 @@ class NGOApp(tk.Tk):
             is_new = False
             if created_at:
                 try:
-                    dt = created_at
+                    dt = created_at if isinstance(created_at, datetime) else datetime.fromisoformat(str(created_at))
                     if dt > new_threshold:
                         is_new = True
                 except Exception:
                     is_new = False
-            highlight = (cat in follows)
-            card_bg = "#eaf6ff" if highlight else CARD_BG
+                
+            card_bg = CARD_BG
             card = tk.Frame(parent, bg=card_bg, bd=1, relief="solid")
             card.pack(fill="x", padx=6, pady=6)
             left = tk.Frame(card, bg=card_bg)
@@ -631,34 +634,46 @@ class NGOApp(tk.Tk):
         btns.pack(pady=8)
 
         def _set_verified(val: bool):
-            cursor.execute("UPDATE event_volunteers SET verified=%s WHERE email=%s AND event_id=%s", (val, email, event_obj["id"]))
-            conn.commit()
-
             sel = tree.selection()
             if not sel:
                 messagebox.showwarning("Select", "Select a volunteer row.")
                 return
+            
             email = sel[0]
+
+            cursor.execute(
+                "UPDATE event_volunteers SET verified=%s WHERE email=%s AND event_id=%s", 
+                (val, email, event_obj["id"])
+            )
+            conn.commit()
+
             for vv in vols:
                 if vv.get("email") == email:
                     vv["verified"] = val
                     break
+
             tree.set(email, "verified", "Yes" if val else "No")
 
 
         def _set_checked(val: bool):
-            cursor.execute("UPDATE event_volunteers SET checked_in=%s WHERE email=%s AND event_id=%s", (val, email, event_obj["id"]))
-            conn.commit()
-            
             sel = tree.selection()
             if not sel:
                 messagebox.showwarning("Select", "Select a volunteer row.")
                 return
+            
             email = sel[0]
+
+            cursor.execute(
+                "UPDATE event_volunteers SET checked_in=%s WHERE email=%s AND event_id=%s", 
+                (val, email, event_obj["id"])
+            )
+            conn.commit()
+            
             for vv in vols:
                 if vv.get("email") == email:
                     vv["checked_in"] = val
                     break
+
             tree.set(email, "checked_in", "Yes" if val else "No")
 
         ttk.Button(btns, text="Mark Verified", command=lambda: _set_verified(True)).pack(side="left", padx=6)
@@ -748,7 +763,7 @@ class NGOApp(tk.Tk):
             right.pack(side="right", padx=8, pady=8)
             tk.Label(left, text=f"{ngo['name']} — {ngo.get('type','')}", bg=CARD_BG, font=("Segoe UI", 10, "bold")).pack(anchor="w")
             tk.Label(left, text=f"{ngo.get('city','')}", bg=CARD_BG, fg="gray30").pack(anchor="w")
-            tk.Label(left, text=ngo.get("desc", ""), bg=CARD_BG, wraplength=700, justify="left").pack(anchor="w", pady=(4, 0))
+            tk.Label(left, text=ngo.get("description", ""), bg=CARD_BG, wraplength=700, justify="left").pack(anchor="w", pady=(4, 0))
             ttk.Button(right, text="View Events", command=lambda n=ngo['name']: self.show_events(filter_ngo=n)).pack(fill="x", pady=4)
             ttk.Button(right, text="Open in Maps", command=lambda n=ngo['name']: open_maps_for(n)).pack(fill="x", pady=4)
             if self.current_user.get("role") == "Volunteer":
@@ -819,15 +834,18 @@ class NGOApp(tk.Tk):
             messagebox.showerror("Unauthorized", "Only NGOs may post events.")
             return
         self.clear_content()
+        
         ttk.Label(self.content_frame, text="Post a Volunteer Event", font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(0, 8))
         form = ttk.Frame(self.content_frame)
         form.pack(anchor="w", pady=6)
+        
         ttk.Label(form, text="Title:").grid(row=0, column=0, sticky="e", padx=6, pady=6)
         title_e = ttk.Entry(form, width=54)
-        title_e.grid(row=0, column=1, padx=6, pady=6)
+        title_e.grid(row=0, column=1, padx=6, pady=6, sticky="w")
+        
         ttk.Label(form, text="Location:").grid(row=1, column=0, sticky="e", padx=6, pady=6)
         loc_e = ttk.Entry(form, width=54)
-        loc_e.grid(row=1, column=1, padx=6, pady=6)
+        loc_e.grid(row=1, column=1, padx=6, pady=6, sticky="w")
 
         ttk.Label(form, text="Date:").grid(row=2, column=0, sticky="e", padx=6, pady=6)
         date_var = tk.StringVar()
@@ -856,8 +874,20 @@ class NGOApp(tk.Tk):
 
             conn = connect_db()
             cursor = conn.cursor()
-            cursor.execute("INSERT INTO events (ngo_name,title,date,location,description,created_at) VALUES (%s,%s,%s,%s,%s,NOW())",(self.current_user["name"],title,date_str,loc,desc))
+            cursor.execute(
+                "INSERT INTO events (ngo_name,title,date,location,description,created_at) VALUES (%s,%s,%s,%s,%s,NOW())",
+                (self.current_user["name"],title,date_str,loc,desc)
+            )
+
             conn.commit()
+
+            messagebox.showinfo("Success", "Event posted successfully!")
+
+            # (Optional) Clear fields after posting
+            title_e.delete(0, tk.END)
+            loc_e.delete(0, tk.END)
+            date_var.set("")
+            desc_t.delete("1.0", tk.END)
 
         ttk.Button(self.content_frame, text="Broadcast Event", command=submit).pack(pady=(8, 0))
 
@@ -915,7 +945,7 @@ class NGOApp(tk.Tk):
         cursor.execute("INSERT INTO event_volunteers(event_id,name,phone,email,verified,checked_in) VALUES (%s,%s,%s,%s,%s,%s)",(event_id, self.current_user["name"], self.current_user["phone"], self.current_user["email"], False, False))
         conn.commit()    
 
-        messagebox.showinfo("Signed Up", "You have successfully joine the event!")
+        messagebox.showinfo("Signed Up", "You have successfully joined the event!")
 
     def _join_ngo(self, ngo_obj):
         if self.current_user.get("role") != "Volunteer":
@@ -981,7 +1011,7 @@ class NGOApp(tk.Tk):
             right = tk.Frame(card, bg=CARD_BG)
             right.pack(side="right", padx=8, pady=8)
             tk.Label(left, text=f"{ngo['name']} — {ngo.get('type','')}", bg=CARD_BG, font=("Segoe UI", 10, "bold")).pack(anchor="w")
-            tk.Label(left, text=ngo.get("desc", ""), bg=CARD_BG, wraplength=700, justify="left").pack(anchor="w", pady=(4, 0))
+            tk.Label(left, text=ngo.get("description", ""), bg=CARD_BG, wraplength=700, justify="left").pack(anchor="w", pady=(4, 0))
             ttk.Button(right, text="View Events", command=lambda n=ngo['name']: self.show_events(filter_ngo=n)).pack(fill="x", pady=4)
         if found == 0:
             ttk.Label(container, text="You haven't joined any NGOs yet.", foreground="gray").pack(pady=20)
@@ -1029,32 +1059,24 @@ class NGOApp(tk.Tk):
         ttk.Label(self.content_frame, text="Profile", font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(0, 8))
         form = ttk.Frame(self.content_frame)
         form.pack(anchor="w", pady=6)
+
         ttk.Label(form, text="Email:").grid(row=0, column=0, sticky="e", padx=6, pady=6)
         ttk.Label(form, text=self.current_user.get("email", ""), font=("Segoe UI", 10, "bold")).grid(row=0, column=1, sticky="w", padx=6, pady=6)
         ttk.Label(form, text="Name:").grid(row=1, column=0, sticky="e", padx=6, pady=6)
         name_e = ttk.Entry(form, width=48)
         name_e.grid(row=1, column=1, padx=6, pady=6)
         name_e.insert(0, self.current_user.get("name", ""))
+
         ttk.Label(form, text="Phone (10 digits):").grid(row=2, column=0, sticky="e", padx=6, pady=6)
         phone_e = ttk.Entry(form, width=48)
         phone_e.grid(row=2, column=1, padx=6, pady=6)
         phone_e.insert(0, self.current_user.get("phone", ""))
+
         ttk.Label(form, text="Role:").grid(row=3, column=0, sticky="e", padx=6, pady=6)
         ttk.Label(form, text=self.current_user.get("role", "")).grid(row=3, column=1, sticky="w", padx=6, pady=6)
         ttk.Label(form, text="Change Password (leave blank to keep):").grid(row=4, column=0, sticky="e", padx=6, pady=6)
         pw_e = ttk.Entry(form, show="*", width=48)
         pw_e.grid(row=4, column=1, padx=6, pady=6)
-
-        follows = self.current_user.get("follows", []) if self.current_user.get("role") == "Volunteer" else []
-        ttk.Label(form, text="Follow categories (ctrl-click to multi):").grid(row=5, column=0, sticky="ne", padx=6, pady=6)
-        listbox = tk.Listbox(form, selectmode="multiple", height=6, exportselection=0)
-        for c in CATEGORIES:
-            listbox.insert("end", c)
-        # preselect follows
-        for i, c in enumerate(CATEGORIES):
-            if c in follows:
-                listbox.selection_set(i)
-        listbox.grid(row=5, column=1, padx=6, pady=6, sticky="w")
 
         actions = ttk.Frame(self.content_frame)
         actions.pack(pady=10)
@@ -1063,7 +1085,6 @@ class NGOApp(tk.Tk):
             name = name_e.get().strip()
             phone = phone_e.get().strip()
             newpw = pw_e.get()
-            sel = [listbox.get(i) for i in listbox.curselection()]
 
             if not name or not phone:
                 messagebox.showerror("Missing", "Name and Phone are required.")
@@ -1099,7 +1120,6 @@ class NGOApp(tk.Tk):
             self.current_user.update({
                 "name": name,
                 "phone": phone,
-                "follows": sel
             })
 
             self.build_sidebar_logged_in_ui()
