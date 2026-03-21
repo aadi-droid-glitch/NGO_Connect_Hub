@@ -53,8 +53,8 @@ def now_iso():
 def connect_db():
     return mysql.connector.connect(
         host="localhost",
-        user="root",
-        password="1983",
+        user=os.getenv("DB_USER", "root"),
+        password=os.getenv("DB_PASS", ""),
         database="ngo_connect"
     )
 
