@@ -1,0 +1,1983 @@
+import customtkinter as ctk
+from customtkinter import CTkScrollableFrame
+import pymysql
+from tkinter import messagebox
+import hashlib
+from datetime import datetime, timezone
+import re
+
+ctk.set_appearance_mode("light")
+ctk.set_default_color_theme("blue")
+
+# ============= COLORS =============
+COLOR_BG        = "#f8fafc"
+COLOR_SIDEBAR   = "#1e293b"
+COLOR_ACCENT    = "#2563eb"
+COLOR_TEXT      = "#0f172a"
+COLOR_TEXT_SEC  = "#64748b"
+COLOR_CARD      = "#ffffff"
+COLOR_BORDER    = "#e2e8f0"
+COLOR_SUCCESS   = "#10b981"
+COLOR_WARNING   = "#f59e0b"
+COLOR_DANGER    = "#ef4444"
+COLOR_LIGHT_BLUE = "#dbeafe"
+
+def hover(c):
+    if not c or not isinstance(c, str) or not c.startswith("#"):
+        return c
+    c = c.lstrip("#")
+    if len(c) == 3:
+        c = "".join([x*2 for x in c])
+    try:
+        r = max(0, int(c[0:2], 16) - 20)
+        g = max(0, int(c[2:4], 16) - 20)
+        b = max(0, int(c[4:6], 16) - 20)
+        return f"#{r:02x}{g:02x}{b:02x}"
+    except:
+        return "#" + c
+
+# ============= FONTS =============
+FONT_HERO       = ("Montserrat", 46, "bold")
+FONT_TITLE      = ("Montserrat", 22, "bold")
+FONT_HEADING    = ("Montserrat", 15, "bold")
+FONT_SUBHEADING = ("Montserrat", 12, "bold")
+FONT_BODY       = ("Inter", 11)
+FONT_SMALL      = ("Inter", 10)
+
+# ============= MYSQL CONFIG =============
+MYSQL_HOST = "localhost"
+MYSQL_USER = "root"
+MYSQL_PASS = "1983"   # ← Change this to your MySQL password
+MYSQL_DB   = "ngoconnect"
+
+CATEGORIES = [
+    "Food", "Education", "Health", "Environment", "Shelter",
+    "Women & Children", "Elderly Care", "Climate Action",
+    "Animal Welfare", "Skill Development"
+]
+
+# =============================================================================
+# DATABASE LAYER
+# =============================================================================
+
+def hash_pw(p):
+    return hashlib.sha256(p.encode()).hexdigest()
+
+def db_conn():
+    try:
+        return pymysql.connect(
+            host=MYSQL_HOST, user=MYSQL_USER,
+            password=MYSQL_PASS, database=MYSQL_DB,
+            charset='utf8mb4', cursorclass=pymysql.cursors.DictCursor
+        )
+    except Exception as e:
+        print(f"[DB] Connection Error: {e}")
+        return None
+
+def db_setup():
+    """Create tables and auto-migrate missing columns on existing tables."""
+    conn = db_conn()
+    if not conn:
+        print("[DB] Cannot connect — check MYSQL_PASS and that the DB exists.")
+        return
+    c = conn.cursor()
+    try:
+        # ── users ──────────────────────────────────────────────────────────
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id         INT PRIMARY KEY AUTO_INCREMENT,
+            email      VARCHAR(120) UNIQUE,
+            name       VARCHAR(100),
+            phone      VARCHAR(16),
+            password   VARCHAR(80),
+            role       ENUM('NGO','Volunteer'),
+            city       VARCHAR(60),
+            skills     TEXT,
+            bio        TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
+
+        # Migration: add skills / bio if they don't exist yet
+        for col, typedef in [("skills", "TEXT"), ("bio", "TEXT")]:
+            try:
+                c.execute(f"ALTER TABLE users ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass   # column already exists — fine
+
+        # ── ngos ───────────────────────────────────────────────────────────
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS ngos (
+            id          INT PRIMARY KEY AUTO_INCREMENT,
+            name        VARCHAR(120) UNIQUE,
+            type        VARCHAR(40),
+            city        VARCHAR(60),
+            description TEXT,
+            email       VARCHAR(120),
+            phone       VARCHAR(16),
+            website     VARCHAR(200),
+            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
+        for col, typedef in [("website", "VARCHAR(200)")]:
+            try:
+                c.execute(f"ALTER TABLE ngos ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass
+
+        # ── ngo_members ────────────────────────────────────────────────────
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS ngo_members (
+            id        INT PRIMARY KEY AUTO_INCREMENT,
+            ngo_id    INT,
+            user_id   INT,
+            joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_mem (ngo_id, user_id)
+        )""")
+
+        # ── events ─────────────────────────────────────────────────────────
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS events (
+            id             INT PRIMARY KEY AUTO_INCREMENT,
+            ngo_id         INT,
+            title          VARCHAR(200),
+            edate          VARCHAR(40),
+            etime          VARCHAR(30) DEFAULT '',
+            location       VARCHAR(200),
+            max_volunteers INT DEFAULT 0,
+            category       VARCHAR(40) DEFAULT '',
+            description    TEXT,
+            requirements   TEXT,
+            created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+            cancelled      TINYINT(1) DEFAULT 0
+        )""")
+        for col, typedef in [
+            ("etime",          "VARCHAR(30) DEFAULT ''"),
+            ("max_volunteers", "INT DEFAULT 0"),
+            ("category",       "VARCHAR(40) DEFAULT ''"),
+            ("requirements",   "TEXT NULL"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE events ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass
+
+        # ── event_participants ─────────────────────────────────────────────
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS event_participants (
+            id          INT PRIMARY KEY AUTO_INCREMENT,
+            event_id    INT,
+            user_id     INT,
+            joined_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+            checked_in  TINYINT(1) DEFAULT 0,
+            hours_logged FLOAT DEFAULT 0,
+            UNIQUE KEY uq_part (event_id, user_id)
+        )""")
+        for col, typedef in [
+            ("checked_in",   "TINYINT(1) DEFAULT 0"),
+            ("hours_logged", "FLOAT DEFAULT 0"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE event_participants ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass
+
+        # ── notifications ──────────────────────────────────────────────────
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS notifications (
+            id      INT PRIMARY KEY AUTO_INCREMENT,
+            user_id INT,
+            text    TEXT,
+            type    VARCHAR(30) DEFAULT 'info',
+            seen    TINYINT(1) DEFAULT 0,
+            ts      DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
+
+        conn.commit()
+        print("[DB] Schema ready.")
+    except Exception as e:
+        print(f"[DB] Setup Error: {e}")
+    finally:
+        conn.close()
+
+db_setup()
+
+def run_select(sql, args=()):
+    conn = db_conn()
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, args)
+            return cur.fetchall() or []
+    except Exception as e:
+        print(f"[SQL] Error: {e}")
+        return []
+    finally:
+        conn.close()
+
+def run_exec(sql, args=()):
+    conn = db_conn()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, args)
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"[SQL] Error: {e}")
+        return False
+    finally:
+        conn.close()
+
+def run_lastid(sql, args=()):
+    conn = db_conn()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, args)
+            lid = cur.lastrowid
+        conn.commit()
+        return lid
+    except Exception as e:
+        print(f"[SQL] Error: {e}")
+        return None
+    finally:
+        conn.close()
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+
+def notify(user_id, text, ntype="info"):
+    run_exec("INSERT INTO notifications (user_id,text,type) VALUES (%s,%s,%s)",
+             (user_id, text, ntype))
+
+def validate_email(e):
+    return bool(re.match(r"^[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}$", e))
+
+def validate_date(d):
+    parts = d.split("-")
+    if len(parts) != 3: return False
+    day, month, year = parts
+    return day.isdigit() and month.isdigit() and year.isdigit() \
+        and 1 <= int(day) <= 31 and 1 <= int(month) <= 12 and len(year) == 4
+
+def validate_time(t):
+    def check_single(s):
+        s = s.strip().upper()
+        if not s.endswith(("AM", "PM")): return False
+        hm = s[:-2].strip().split(":")
+        return len(hm) == 2 and hm[0].isdigit() and hm[1].isdigit() \
+            and 1 <= int(hm[0]) <= 12 and 0 <= int(hm[1]) <= 59
+    parts = [p.strip() for p in t.split(" - ")]
+    return check_single(parts[0]) if len(parts) == 1 else \
+        check_single(parts[0]) and check_single(parts[1])
+
+# =============================================================================
+# SHARED UI HELPERS
+# =============================================================================
+
+def lbl(parent, text, font, color, **pack_kw):
+    w = ctk.CTkLabel(parent, text=text, font=font, text_color=color)
+    w.pack(**pack_kw)
+    return w
+
+def entry(parent, placeholder, show=None, height=38):
+    kw = dict(placeholder_text=placeholder, font=FONT_BODY, height=height, corner_radius=8)
+    if show:
+        kw["show"] = show
+    e = ctk.CTkEntry(parent, **kw)
+    e.pack(fill="x", pady=(0, 10))
+    return e
+
+def field(parent, label_text, placeholder, show=None):
+    lbl(parent, label_text, FONT_SMALL, COLOR_TEXT, anchor="w", pady=(0, 3))
+    return entry(parent, placeholder, show)
+
+def btn(parent, text, cmd, fg=None, tc="#fff", w=None, h=40, side=None, padx=0, pady=0):
+    color = fg or COLOR_ACCENT
+
+    kw = dict(
+        text=text,
+        font=FONT_SUBHEADING,
+        fg_color=color,
+        hover_color=hover(color),   
+        text_color=tc,
+        height=h,
+        corner_radius=10,
+        command=cmd
+    )
+
+    if w:
+        kw["width"] = w
+
+    b = ctk.CTkButton(parent, **kw)
+
+    if side:
+        b.pack(side=side, padx=padx, pady=pady)
+    else:
+        b.pack(fill="x", pady=pady)
+
+    return b
+
+def divider(parent, pady=12):
+    f = ctk.CTkFrame(parent, fg_color=COLOR_BORDER, height=1)
+    f.pack(fill="x", pady=pady)
+
+def card(parent, **pack_kw):
+    c = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=12,
+                     border_width=1, border_color=COLOR_BORDER)
+    c.pack(**pack_kw)
+    return c
+
+def section_title(parent, text):
+    f = ctk.CTkFrame(parent, fg_color="transparent")
+    f.pack(fill="x", pady=(18, 8))
+    lbl(f, text, FONT_HEADING, COLOR_TEXT, anchor="w")
+    ctk.CTkFrame(f, fg_color=COLOR_ACCENT, height=2, width=40).pack(anchor="w", pady=(2, 0))
+
+def top_nav(parent, title, back_fn, right_widgets=None):
+    """Blue top bar with back arrow and optional right-side buttons."""
+    bar = ctk.CTkFrame(parent, fg_color=COLOR_ACCENT, height=68)
+    bar.pack(fill="x")
+    bar.pack_propagate(False)
+    inner = ctk.CTkFrame(bar, fg_color="transparent")
+    inner.pack(fill="both", expand=True, padx=24, pady=10)
+
+    ctk.CTkButton(inner, text="← Back", font=FONT_SUBHEADING,
+                  fg_color="transparent", text_color="#fff",
+                  hover_color="#1d4ed8", width=80, height=36, corner_radius=8,
+                  command=back_fn).pack(side="left", padx=(0, 12))
+    ctk.CTkLabel(inner, text=title, font=FONT_HEADING, text_color="#fff").pack(side="left")
+
+    if right_widgets:
+        rf = ctk.CTkFrame(inner, fg_color="transparent")
+        rf.pack(side="right")
+        for rw in right_widgets:
+            rw(rf)
+    return inner
+
+def stat_tile(parent, icon, value, label, color=COLOR_ACCENT):
+    c = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=12,
+                     border_width=1, border_color=COLOR_BORDER)
+    c.pack(side="left", fill="both", expand=True, padx=5)
+    ctk.CTkLabel(c, text=icon, font=("Segoe UI Emoji", 26), text_color=color).pack(pady=(14, 2))
+    ctk.CTkLabel(c, text=str(value), font=("Montserrat", 20, "bold"), text_color=color).pack()
+    ctk.CTkLabel(c, text=label, font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(pady=(0, 12))
+
+# =============================================================================
+# MAIN APPLICATION
+# =============================================================================
+
+class App(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("NGO Connect Hub")
+        self.geometry("1380x840")
+        self.minsize(1100, 660)
+        self.user = None
+        self.show_landing()
+
+    def clear(self):
+        for w in self.winfo_children():
+            w.destroy()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # LANDING PAGE
+    # ─────────────────────────────────────────────────────────────────────────
+    def show_landing(self):
+        self.clear()
+        root = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        root.pack(fill="both", expand=True)
+        scroll = CTkScrollableFrame(root, fg_color=COLOR_BG)
+        scroll.pack(fill="both", expand=True)
+
+        # ── HERO ─────────────────────────────────────────────────────────────
+        hero = ctk.CTkFrame(scroll, fg_color=COLOR_ACCENT)
+        hero.pack(fill="x")
+        hc = ctk.CTkFrame(hero, fg_color="transparent")
+        hc.pack(expand=True, padx=80, pady=70)
+
+        ctk.CTkLabel(hc, text="🌍", font=("Segoe UI Emoji", 80), text_color="#fff").pack()
+        ctk.CTkLabel(hc, text="NGO Connect Hub", font=FONT_HERO, text_color="#fff").pack(pady=(8, 0))
+        ctk.CTkLabel(hc, text="Connecting Communities. Empowering Change.",
+                     font=("Inter", 15), text_color="#dbeafe").pack(pady=(4, 0))
+        ctk.CTkLabel(hc, text="The one platform where passionate volunteers meet impactful organisations.",
+                     font=FONT_SMALL, text_color="#bfdbfe", wraplength=700, justify="center").pack(pady=(6, 28))
+
+        bf = ctk.CTkFrame(hc, fg_color="transparent")
+        bf.pack()
+        ctk.CTkButton(bf, text="🚀  Get Started — It's Free", font=FONT_SUBHEADING,
+                      fg_color="#ffffff", hover_color="#e2e8f0", text_color=COLOR_ACCENT, width=200, height=44,
+                      corner_radius=10, command=self.show_register_choice).pack(side="left", padx=8)
+        ctk.CTkButton(bf, text="Sign In", font=FONT_SUBHEADING,
+                      fg_color="transparent", text_color="#fff",
+                      border_width=2, border_color="#fff",
+                      width=130, height=44, corner_radius=10,
+                      command=self.show_login).pack(side="left", padx=8)
+
+        # ── LIVE STATS ────────────────────────────────────────────────────────
+        stats_bg = ctk.CTkFrame(scroll, fg_color=COLOR_CARD, corner_radius=0)
+        stats_bg.pack(fill="x")
+        sf = ctk.CTkFrame(stats_bg, fg_color="transparent")
+        sf.pack(pady=28)
+
+        def _count(q):
+            r = run_select(q)
+            return r[0]["c"] if r else 0
+
+        for icon, label, val in [
+            ("🏢", "NGOs Registered",  _count("SELECT COUNT(*) as c FROM ngos")),
+            ("👥", "Volunteers",       _count("SELECT COUNT(*) as c FROM users WHERE role='Volunteer'")),
+            ("📅", "Active Events",    _count("SELECT COUNT(*) as c FROM events WHERE cancelled=0")),
+        ]:
+            tf = ctk.CTkFrame(sf, fg_color="transparent")
+            tf.pack(side="left", padx=50)
+            ctk.CTkLabel(tf, text=icon, font=("Segoe UI Emoji", 32), text_color=COLOR_ACCENT).pack()
+            ctk.CTkLabel(tf, text=str(val), font=("Montserrat", 26, "bold"), text_color=COLOR_TEXT).pack()
+            ctk.CTkLabel(tf, text=label, font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack()
+
+        # ── HOW IT WORKS ──────────────────────────────────────────────────────
+        hw = ctk.CTkFrame(scroll, fg_color=COLOR_BG)
+        hw.pack(fill="x", padx=70, pady=50)
+        ctk.CTkLabel(hw, text="How It Works", font=FONT_TITLE, text_color=COLOR_TEXT).pack()
+        ctk.CTkLabel(hw, text="Simple steps to start making a difference",
+                     font=FONT_BODY, text_color=COLOR_TEXT_SEC).pack(pady=(4, 24))
+
+        steps_f = ctk.CTkFrame(hw, fg_color="transparent")
+        steps_f.pack(fill="x")
+        steps = [
+            ("1️⃣", "Create Account", "Sign up as a Volunteer or an NGO in under 2 minutes."),
+            ("2️⃣", "Explore", "Browse NGOs near you or browse upcoming volunteer events."),
+            ("3️⃣", "Connect", "Join an NGO as a member or register for an event you care about."),
+            ("4️⃣", "Make Impact", "Attend events, log hours, and track your contribution over time."),
+        ]
+        for icon, title, desc in steps:
+            c = ctk.CTkFrame(steps_f, fg_color=COLOR_CARD, corner_radius=12,
+                             border_width=1, border_color=COLOR_BORDER)
+            c.pack(side="left", fill="both", expand=True, padx=6)
+            ctk.CTkLabel(c, text=icon, font=("Segoe UI Emoji", 30), text_color=COLOR_ACCENT).pack(pady=(16, 4))
+            ctk.CTkLabel(c, text=title, font=FONT_SUBHEADING, text_color=COLOR_TEXT).pack()
+            ctk.CTkLabel(c, text=desc, font=FONT_SMALL, text_color=COLOR_TEXT_SEC,
+                         wraplength=190, justify="center").pack(padx=10, pady=(4, 16))
+
+        # ── FOR VOLUNTEERS ────────────────────────────────────────────────────
+        vf = ctk.CTkFrame(scroll, fg_color="#eff6ff")
+        vf.pack(fill="x")
+        vc = ctk.CTkFrame(vf, fg_color="transparent")
+        vc.pack(fill="x", padx=70, pady=50)
+
+        left_v = ctk.CTkFrame(vc, fg_color="transparent")
+        left_v.pack(side="left", fill="both", expand=True, padx=(0, 30))
+        ctk.CTkLabel(left_v, text="For Volunteers 👤", font=FONT_TITLE, text_color=COLOR_TEXT).pack(anchor="w")
+        ctk.CTkLabel(left_v, text="Find meaningful ways to give back to your community.",
+                     font=FONT_BODY, text_color=COLOR_TEXT_SEC).pack(anchor="w", pady=(4, 16))
+        for pt in ["🔍  Search events by city, category, or keyword",
+                   "🏢  Join NGOs and become a long-term member",
+                   "📋  Track all your event registrations in one place",
+                   "⏱️  See your total volunteer hours automatically logged",
+                   "🔔  Get notified when new events match your interests"]:
+            ctk.CTkLabel(left_v, text=pt, font=FONT_BODY, text_color=COLOR_TEXT).pack(anchor="w", pady=2)
+        ctk.CTkButton(left_v, text="Register as Volunteer →", font=FONT_SUBHEADING,
+                      fg_color=COLOR_ACCENT, text_color="#fff", width=200, height=40,
+                      corner_radius=10, command=self.show_register_vol).pack(anchor="w", pady=(16, 0))
+
+        right_v = ctk.CTkFrame(vc, fg_color=COLOR_CARD, corner_radius=14,
+                               border_width=1, border_color=COLOR_BORDER, width=280)
+        right_v.pack(side="right", fill="y")
+        right_v.pack_propagate(False)
+        rvc = ctk.CTkFrame(right_v, fg_color="transparent")
+        rvc.pack(expand=True, padx=20, pady=20)
+        ctk.CTkLabel(rvc, text="👤", font=("Segoe UI Emoji", 50), text_color=COLOR_ACCENT).pack(pady=(8, 4))
+        ctk.CTkLabel(rvc, text="Volunteer Profile", font=FONT_SUBHEADING, text_color=COLOR_TEXT).pack()
+        for line in ["✓  Skills & interests listed", "✓  City-based matching", "✓  Impact dashboard"]:
+            ctk.CTkLabel(rvc, text=line, font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(anchor="w", pady=2)
+
+        # ── FOR NGOs ──────────────────────────────────────────────────────────
+        nf = ctk.CTkFrame(scroll, fg_color=COLOR_BG)
+        nf.pack(fill="x")
+        nc = ctk.CTkFrame(nf, fg_color="transparent")
+        nc.pack(fill="x", padx=70, pady=50)
+
+        left_n = ctk.CTkFrame(nc, fg_color=COLOR_CARD, corner_radius=14,
+                              border_width=1, border_color=COLOR_BORDER, width=280)
+        left_n.pack(side="left", fill="y")
+        left_n.pack_propagate(False)
+        lnc = ctk.CTkFrame(left_n, fg_color="transparent")
+        lnc.pack(expand=True, padx=20, pady=20)
+        ctk.CTkLabel(lnc, text="🏢", font=("Segoe UI Emoji", 50), text_color=COLOR_SUCCESS).pack(pady=(8, 4))
+        ctk.CTkLabel(lnc, text="NGO Dashboard", font=FONT_SUBHEADING, text_color=COLOR_TEXT).pack()
+        for line in ["✓  Post & manage events", "✓  View all volunteers", "✓  Member roster"]:
+            ctk.CTkLabel(lnc, text=line, font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(anchor="w", pady=2)
+
+        right_n = ctk.CTkFrame(nc, fg_color="transparent")
+        right_n.pack(side="right", fill="both", expand=True, padx=(30, 0))
+        ctk.CTkLabel(right_n, text="For NGOs 🏢", font=FONT_TITLE, text_color=COLOR_TEXT).pack(anchor="w")
+        ctk.CTkLabel(right_n, text="Reach thousands of motivated volunteers and grow your impact.",
+                     font=FONT_BODY, text_color=COLOR_TEXT_SEC).pack(anchor="w", pady=(4, 16))
+        for pt in ["📣  Publish events with full details — date, time, location, capacity",
+                   "👥  See exactly who signed up and manage check-ins",
+                   "🏅  Track total volunteer hours contributed to your events",
+                   "🔔  Automatically notify your members about new events",
+                   "🌐  Public directory listing so volunteers can find you"]:
+            ctk.CTkLabel(right_n, text=pt, font=FONT_BODY, text_color=COLOR_TEXT).pack(anchor="w", pady=2)
+        ctk.CTkButton(right_n, text="Register Your NGO →", font=FONT_SUBHEADING,
+                      fg_color=COLOR_SUCCESS, hover_color="#90C0B1", text_color="#fff", width=200, height=40,
+                      corner_radius=10, command=self.show_register_ngo).pack(anchor="w", pady=(16, 0))
+
+        # ── FAQ / QUICK GUIDE ─────────────────────────────────────────────────
+        fq = ctk.CTkFrame(scroll, fg_color="#eff6ff")
+        fq.pack(fill="x")
+        fqc = ctk.CTkFrame(fq, fg_color="transparent")
+        fqc.pack(fill="x", padx=70, pady=50)
+        ctk.CTkLabel(fqc, text="Quick Guide", font=FONT_TITLE, text_color=COLOR_TEXT).pack()
+        ctk.CTkLabel(fqc, text="Everything you need to know at a glance",
+                     font=FONT_BODY, text_color=COLOR_TEXT_SEC).pack(pady=(4, 20))
+        faqs = [
+            ("Is it free?",
+             "Yes — completely free for both volunteers and NGOs."),
+            ("Do I need to be in a specific city?",
+             "No. You can browse events from any city and filter by location."),
+            ("How does an NGO post an event?",
+             "After registering and signing in, NGOs see a '+ Post Event' button on their dashboard and in the Events page."),
+            ("How do volunteers track their hours?",
+             "Once an NGO marks you as 'Checked In' at an event, they can log your hours. You see the total on your dashboard."),
+            ("Can a volunteer join multiple NGOs?",
+             "Yes — you can join as many NGOs as you like from the NGO Directory."),
+        ]
+        for q, a in faqs:
+            fc_row = ctk.CTkFrame(fqc, fg_color=COLOR_CARD, corner_radius=10,
+                                  border_width=1, border_color=COLOR_BORDER)
+            fc_row.pack(fill="x", pady=4)
+            fr = ctk.CTkFrame(fc_row, fg_color="transparent")
+            fr.pack(fill="x", padx=16, pady=10)
+            ctk.CTkLabel(fr, text=f"❓ {q}", font=FONT_SUBHEADING, text_color=COLOR_TEXT).pack(anchor="w")
+            ctk.CTkLabel(fr, text=f"   {a}", font=FONT_BODY, text_color=COLOR_TEXT_SEC,
+                         wraplength=900, justify="left").pack(anchor="w", pady=(2, 0))
+
+        # ── CTA FOOTER ────────────────────────────────────────────────────────
+        cta = ctk.CTkFrame(scroll, fg_color=COLOR_ACCENT)
+        cta.pack(fill="x")
+        ctac = ctk.CTkFrame(cta, fg_color="transparent")
+        ctac.pack(padx=80, pady=50)
+        ctk.CTkLabel(ctac, text="Ready to make a difference?", font=FONT_TITLE, text_color="#fff").pack()
+        ctk.CTkLabel(ctac, text="Join hundreds of volunteers and NGOs already on the platform.",
+                     font=FONT_BODY, text_color="#dbeafe").pack(pady=(4, 20))
+        cb = ctk.CTkFrame(ctac, fg_color="transparent")
+        cb.pack()
+        ctk.CTkButton(cb, text="Register as Volunteer", font=FONT_SUBHEADING,
+                      fg_color="#ffffff", hover_color="#e2e8f0", text_color=COLOR_ACCENT, width=190, height=42,
+                      corner_radius=10, command=self.show_register_vol).pack(side="left", padx=8)
+        ctk.CTkButton(cb, text="Register as NGO", font=FONT_SUBHEADING,
+                      fg_color="transparent", text_color="#fff",
+                      border_width=2, border_color="#fff",
+                      width=170, height=42, corner_radius=10,
+                      command=self.show_register_ngo).pack(side="left", padx=8)
+        ctk.CTkButton(cb, text="Sign In →", font=FONT_SUBHEADING,
+                      fg_color=COLOR_LIGHT_BLUE, text_color=COLOR_ACCENT, hover_color="#99a9d4",
+                      width=120, height=42, corner_radius=10,
+                      command=self.show_login).pack(side="left", padx=8)
+
+        # ── FOOTER ────────────────────────────────────────────────────────────
+        foot = ctk.CTkFrame(scroll, fg_color=COLOR_SIDEBAR)
+        foot.pack(fill="x")
+        ctk.CTkLabel(foot, text="© 2026 NGO Connect Hub  •  Empowering communities across India",
+                     font=FONT_SMALL, text_color="#94a3b8").pack(pady=22)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # LOGIN
+    # ─────────────────────────────────────────────────────────────────────────
+    def show_login(self):
+        self.clear()
+        root = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        root.pack(fill="both", expand=True)
+
+        # Left panel — branding
+        lp = ctk.CTkFrame(root, fg_color=COLOR_ACCENT, width=460)
+        lp.pack(side="left", fill="y")
+        lp.pack_propagate(False)
+        lpc = ctk.CTkFrame(lp, fg_color="transparent")
+        lpc.pack(expand=True, padx=40)
+        ctk.CTkLabel(lpc, text="🌍", font=("Segoe UI Emoji", 70), text_color="#fff").pack(pady=(0, 10))
+        ctk.CTkLabel(lpc, text="NGO Connect", font=("Montserrat", 26, "bold"), text_color="#fff").pack()
+        ctk.CTkLabel(lpc, text="Connecting Communities\nEmpowering Change",
+                     font=("Inter", 13), text_color="#dbeafe", justify="center").pack(pady=(8, 0))
+        divider(lpc)
+        for pt in ["✓  Find volunteer events near you",
+                   "✓  Join NGOs you believe in",
+                   "✓  Track your volunteer hours",
+                   "✓  Get notified about opportunities"]:
+            ctk.CTkLabel(lpc, text=pt, font=FONT_BODY, text_color="#bfdbfe").pack(anchor="w", pady=2)
+
+        ctk.CTkButton(lpc, text="← Back to Home", font=FONT_SMALL,
+                      fg_color="transparent", text_color="#93c5fd",
+                      hover_color="#a5b3db", width=140, height=30,
+                      corner_radius=8, command=self.show_landing).pack(pady=(24, 0))
+
+        # Right panel — outer wrapper expands to fill space
+        rp = ctk.CTkFrame(root, fg_color=COLOR_BG)
+        rp.pack(side="right", fill="both", expand=True)
+
+        # This inner frame uses pack(expand=True) so it grows to fill rp,
+        # then the form card inside it is naturally centred.
+        rp_inner = ctk.CTkFrame(rp, fg_color="transparent")
+        rp_inner.pack(fill="both", expand=True)
+
+        # Spacer rows above and below push the card to vertical centre
+        rp_inner.rowconfigure(0, weight=1)
+        rp_inner.rowconfigure(2, weight=1)
+        rp_inner.columnconfigure(0, weight=1)
+        rp_inner.columnconfigure(2, weight=1)
+
+        form = ctk.CTkFrame(rp_inner, fg_color=COLOR_CARD, corner_radius=16,
+                            border_width=1, border_color=COLOR_BORDER)
+        form.grid(row=1, column=1, padx=40, pady=40, sticky="nsew")
+
+        fi = ctk.CTkFrame(form, fg_color="transparent")
+        fi.pack(fill="both", expand=True, padx=36, pady=36)
+
+        ctk.CTkLabel(fi, text="Welcome Back 👋", font=FONT_TITLE, text_color=COLOR_TEXT).pack(pady=(0, 4))
+        ctk.CTkLabel(fi, text="Sign in to your NGO Connect account",
+                     font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(pady=(0, 20))
+
+        ctk.CTkLabel(fi, text="Email Address", font=FONT_SMALL, text_color=COLOR_TEXT).pack(anchor="w", pady=(0, 3))
+        em_entry = ctk.CTkEntry(fi, placeholder_text="your@email.com",
+                                font=FONT_BODY, height=40, corner_radius=8)
+        em_entry.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(fi, text="Password", font=FONT_SMALL, text_color=COLOR_TEXT).pack(anchor="w", pady=(0, 3))
+        pw_entry = ctk.CTkEntry(fi, placeholder_text="Your password",
+                                show="*", font=FONT_BODY, height=40, corner_radius=8)
+        pw_entry.pack(fill="x", pady=(0, 6))
+
+        err_lbl = ctk.CTkLabel(fi, text="", font=FONT_SMALL, text_color=COLOR_DANGER)
+        err_lbl.pack(pady=(0, 10))
+
+        def do_login():
+            em = em_entry.get().strip()
+            pw = pw_entry.get().strip()
+            if not em or not pw:
+                err_lbl.configure(text="⚠  Please enter both email and password.")
+                return
+            users = run_select("SELECT * FROM users WHERE email=%s", (em,))
+            if users and users[0]["password"] == hash_pw(pw):
+                self.user = users[0]
+                self.unbind("<Return>")
+                self.show_dashboard()
+            else:
+                err_lbl.configure(text="⚠  Incorrect email or password.")
+
+        self.bind("<Return>", lambda e: do_login())
+
+        ctk.CTkButton(fi, text="Sign In  →", font=FONT_SUBHEADING,
+                      fg_color=COLOR_ACCENT, text_color="#fff",
+                      height=44, corner_radius=10,
+                      command=do_login).pack(fill="x", pady=(0, 10))
+
+        ctk.CTkFrame(fi, fg_color=COLOR_BORDER, height=1).pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(fi, text="Don't have an account yet?",
+                     font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(pady=(0, 6))
+
+        ctk.CTkButton(fi, text="Create a Free Account", font=FONT_SUBHEADING,
+                      fg_color=COLOR_LIGHT_BLUE, text_color=COLOR_ACCENT, hover_color="#a0acce",
+                      height=42, corner_radius=10,
+                      command=self.show_register_choice).pack(fill="x", pady=(0, 8))
+
+        ctk.CTkButton(fi, text="← Back to Home", font=FONT_SMALL,
+                      fg_color="#f1f5f9", text_color=COLOR_TEXT_SEC, hover_color="#8c9bc5",
+                      height=36, corner_radius=8,
+                      command=self.show_landing).pack(fill="x")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # REGISTER CHOICE
+    # ─────────────────────────────────────────────────────────────────────────
+    def show_register_choice(self):
+        self.clear()
+        root = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        root.pack(fill="both", expand=True)
+        center = ctk.CTkFrame(root, fg_color="transparent")
+        center.pack(expand=True)
+
+        ctk.CTkLabel(center, text="Join NGO Connect", font=FONT_TITLE, text_color=COLOR_TEXT).pack(pady=(0, 6))
+        ctk.CTkLabel(center, text="I want to join as a...", font=FONT_BODY, text_color=COLOR_TEXT_SEC).pack(pady=(0, 30))
+
+        cf = ctk.CTkFrame(center, fg_color="transparent")
+        cf.pack()
+
+        def choice(parent, icon, title, bullets, color, cmd):
+            c = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=16, width=310, height=340,
+                             border_width=2, border_color=COLOR_BORDER)
+            c.pack(side="left", padx=16)
+            c.pack_propagate(False)
+            ci = ctk.CTkFrame(c, fg_color="transparent")
+            ci.pack(expand=True, padx=20)
+            ctk.CTkLabel(ci, text=icon, font=("Segoe UI Emoji", 52), text_color=color).pack(pady=(16, 6))
+            ctk.CTkLabel(ci, text=title, font=FONT_HEADING, text_color=COLOR_TEXT).pack()
+            ctk.CTkFrame(ci, fg_color="transparent", height=6).pack()
+            for b in bullets:
+                ctk.CTkLabel(ci, text=b, font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(anchor="w")
+            ctk.CTkButton(ci, text=f"Continue as {title}", font=FONT_SUBHEADING,
+                          fg_color=color, text_color="#fff", width=240, height=40,
+                          corner_radius=10, command=cmd).pack(pady=(14, 20))
+
+        choice(cf, "👤", "Volunteer",
+               ["• Browse & join events", "• Join NGOs", "• Track your hours"],
+               COLOR_ACCENT, self.show_register_vol)
+        choice(cf, "🏢", "NGO",
+               ["• Post events", "• Manage volunteers", "• Grow your network"],
+               COLOR_SUCCESS, self.show_register_ngo)
+
+        ctk.CTkFrame(center, fg_color="transparent", height=20).pack()
+        ctk.CTkButton(center, text="Already have an account?  Sign In →",
+                      font=FONT_SMALL, fg_color="transparent", text_color=COLOR_ACCENT,
+                      hover_color=COLOR_LIGHT_BLUE, height=30, command=self.show_login).pack()
+        ctk.CTkButton(center, text="← Back to Home", font=FONT_SMALL,
+                      fg_color="transparent", text_color=COLOR_TEXT_SEC, hover_color="#8f9dc4",
+                      height=28, command=self.show_landing).pack(pady=4)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # REGISTER VOLUNTEER
+    # ─────────────────────────────────────────────────────────────────────────
+    def show_register_vol(self):
+        self.clear()
+        root = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        root.pack(fill="both", expand=True)
+        top_nav(root, "👤  Register as Volunteer", self.show_register_choice)
+
+        scroll = CTkScrollableFrame(root, fg_color=COLOR_BG)
+        scroll.pack(fill="both", expand=True)
+
+        wrap = ctk.CTkFrame(scroll, fg_color=COLOR_CARD, corner_radius=12,
+                            border_width=1, border_color=COLOR_BORDER)
+        wrap.pack(fill="both", padx=120, pady=24)
+        fi = ctk.CTkFrame(wrap, fg_color="transparent")
+        fi.pack(fill="both", padx=36, pady=30)
+
+        ctk.CTkLabel(fi, text="Create Your Volunteer Account",
+                     font=FONT_HEADING, text_color=COLOR_TEXT).pack(anchor="w", pady=(0, 16))
+
+        name_e  = field(fi, "Full Name *", "e.g. Priya Sharma")
+        email_e = field(fi, "Email Address *", "your@email.com")
+        phone_e = field(fi, "Phone Number * (10 digits)", "9876543210")
+        city_e  = field(fi, "City *", "e.g. Bengaluru")
+
+        ctk.CTkLabel(fi, text="Skills / Interests  (comma separated, optional)",
+                     font=FONT_SMALL, text_color=COLOR_TEXT).pack(anchor="w", pady=(0, 3))
+        skills_e = ctk.CTkEntry(fi, placeholder_text="e.g. Teaching, First Aid, Photography",
+                                font=FONT_BODY, height=38, corner_radius=8)
+        skills_e.pack(fill="x", pady=(0, 10))
+
+        pw1_e = field(fi, "Password * (min 6 characters)", "Choose a password", show="*")
+        pw2_e = field(fi, "Confirm Password *", "Repeat password", show="*")
+
+        err = ctk.CTkLabel(fi, text="", font=FONT_SMALL, text_color=COLOR_DANGER)
+        err.pack(pady=(0, 6))
+
+        def do_reg():
+            n  = name_e.get().strip()
+            em = email_e.get().strip()
+            ph = phone_e.get().strip()
+            ct = city_e.get().strip()
+            sk = skills_e.get().strip()
+            p1 = pw1_e.get().strip()
+            p2 = pw2_e.get().strip()
+
+            if not all([n, em, ph, ct, p1, p2]):
+                err.configure(text="All fields marked * are required."); return
+            if not validate_email(em):
+                err.configure(text="Please enter a valid email address."); return
+            if len(ph) != 10 or not ph.isdigit():
+                err.configure(text="Phone must be exactly 10 digits."); return
+            if len(p1) < 6:
+                err.configure(text="Password must be at least 6 characters."); return
+            if p1 != p2:
+                err.configure(text="Passwords do not match."); return
+            if run_select("SELECT id FROM users WHERE email=%s", (em,)):
+                err.configure(text="This email is already registered. Try signing in."); return
+
+            uid = run_lastid(
+                "INSERT INTO users (email,name,phone,password,role,city,skills) "
+                "VALUES (%s,%s,%s,%s,'Volunteer',%s,%s)",
+                (em, n, ph, hash_pw(p1), ct, sk)
+            )
+            if uid:
+                messagebox.showinfo("Account Created! 🎉",
+                                    f"Welcome to NGO Connect, {n}!\n\nYou can now sign in and start exploring events and NGOs near you.")
+                self.show_login()
+            else:
+                err.configure(text="Registration failed. Please try again.")
+
+        bf = ctk.CTkFrame(fi, fg_color="transparent")
+        bf.pack(fill="x", pady=(8, 0))
+        ctk.CTkButton(bf, text="Create My Account", font=FONT_SUBHEADING,
+                      fg_color=COLOR_ACCENT, text_color="#fff",
+                      width=170, height=42, corner_radius=10, command=do_reg).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(bf, text="← Back", font=FONT_SUBHEADING,
+                      fg_color=COLOR_LIGHT_BLUE, text_color=COLOR_ACCENT, hover_color="#a6b3d6",
+                      width=100, height=42, corner_radius=10,
+                      command=self.show_register_choice).pack(side="left")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # REGISTER NGO
+    # ─────────────────────────────────────────────────────────────────────────
+    def show_register_ngo(self):
+        self.clear()
+        root = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        root.pack(fill="both", expand=True)
+        top_nav(root, "🏢  Register Your NGO", self.show_register_choice)
+
+        scroll = CTkScrollableFrame(root, fg_color=COLOR_BG)
+        scroll.pack(fill="both", expand=True)
+
+        wrap = ctk.CTkFrame(scroll, fg_color=COLOR_CARD, corner_radius=12,
+                            border_width=1, border_color=COLOR_BORDER)
+        wrap.pack(fill="both", padx=120, pady=24)
+        fi = ctk.CTkFrame(wrap, fg_color="transparent")
+        fi.pack(fill="both", padx=36, pady=30)
+
+        ctk.CTkLabel(fi, text="Register Your Organisation",
+                     font=FONT_HEADING, text_color=COLOR_TEXT).pack(anchor="w", pady=(0, 16))
+
+        name_e  = field(fi, "Organisation Name *", "e.g. Green Earth Foundation")
+
+        ctk.CTkLabel(fi, text="Category *", font=FONT_SMALL, text_color=COLOR_TEXT).pack(anchor="w", pady=(0, 3))
+        cat_cb = ctk.CTkComboBox(fi, values=CATEGORIES, font=FONT_BODY,
+                                 height=38, corner_radius=8, state="readonly")
+        cat_cb.set("Education")
+        cat_cb.pack(fill="x", pady=(0, 10))
+
+        city_e    = field(fi, "City *", "e.g. Mumbai")
+        email_e   = field(fi, "Email Address *", "org@example.com")
+        phone_e   = field(fi, "Contact Phone * (10 digits)", "9876543210")
+        website_e = field(fi, "Website (optional)", "https://yoursite.org")
+
+        ctk.CTkLabel(fi, text="Description * — Tell volunteers about your mission",
+                     font=FONT_SMALL, text_color=COLOR_TEXT).pack(anchor="w", pady=(0, 3))
+        desc_tb = ctk.CTkTextbox(fi, font=FONT_BODY, height=90, corner_radius=8)
+        desc_tb.pack(fill="x", pady=(0, 10))
+
+        pw1_e = field(fi, "Password * (min 6 characters)", "Choose a password", show="*")
+        pw2_e = field(fi, "Confirm Password *", "Repeat password", show="*")
+
+        err = ctk.CTkLabel(fi, text="", font=FONT_SMALL, text_color=COLOR_DANGER)
+        err.pack(pady=(0, 6))
+
+        def do_reg():
+            on = name_e.get().strip()
+            ct = city_e.get().strip()
+            em = email_e.get().strip()
+            ph = phone_e.get().strip()
+            ws = website_e.get().strip()
+            de = desc_tb.get("1.0", "end").strip()
+            p1 = pw1_e.get().strip()
+            p2 = pw2_e.get().strip()
+
+            if not all([on, ct, em, ph, de, p1, p2]):
+                err.configure(text="All fields marked * are required."); return
+            if not validate_email(em):
+                err.configure(text="Please enter a valid email address."); return
+            if len(ph) != 10 or not ph.isdigit():
+                err.configure(text="Phone must be exactly 10 digits."); return
+            if len(p1) < 6:
+                err.configure(text="Password must be at least 6 characters."); return
+            if p1 != p2:
+                err.configure(text="Passwords do not match."); return
+            if run_select("SELECT id FROM users WHERE email=%s", (em,)):
+                err.configure(text="This email is already registered. Try signing in."); return
+            if run_select("SELECT id FROM ngos WHERE name=%s", (on,)):
+                err.configure(text="An NGO with this name already exists."); return
+
+            ngo_id = run_lastid(
+                "INSERT INTO ngos (name,type,city,description,email,phone,website) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (on, cat_cb.get(), ct, de, em, ph, ws)
+            )
+            uid = run_lastid(
+                "INSERT INTO users (email,name,phone,password,role,city) "
+                "VALUES (%s,%s,%s,%s,'NGO',%s)",
+                (em, on, ph, hash_pw(p1), ct)
+            )
+            if ngo_id and uid:
+                messagebox.showinfo("NGO Registered! 🎉",
+                                    f"'{on}' is now live on NGO Connect!\n\nSign in to post your first event and start connecting with volunteers.")
+                self.show_login()
+            else:
+                err.configure(text="Registration failed. Please try again.")
+
+        bf = ctk.CTkFrame(fi, fg_color="transparent")
+        bf.pack(fill="x", pady=(8, 0))
+        ctk.CTkButton(bf, text="Register NGO", font=FONT_SUBHEADING,
+                      fg_color=COLOR_SUCCESS, text_color="#fff",
+                      width=160, height=42, corner_radius=10, command=do_reg).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(bf, text="← Back", font=FONT_SUBHEADING,
+                      fg_color=COLOR_LIGHT_BLUE, text_color=COLOR_ACCENT, hover_color="#95a2c5",
+                      width=100, height=42, corner_radius=10,
+                      command=self.show_register_choice).pack(side="left")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # DASHBOARD
+    # ─────────────────────────────────────────────────────────────────────────
+    def show_dashboard(self):
+        self.clear()
+        root = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        root.pack(fill="both", expand=True)
+
+        # Top header bar
+        hdr = ctk.CTkFrame(root, fg_color=COLOR_ACCENT, height=72)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        hc = ctk.CTkFrame(hdr, fg_color="transparent")
+        hc.pack(fill="both", expand=True, padx=28, pady=12)
+        ctk.CTkLabel(hc, text=f"👋  Welcome back, {self.user['name']}",
+                     font=FONT_HEADING, text_color="#fff").pack(side="left", anchor="w")
+        ctk.CTkLabel(hc, text=f"{self.user['role']}  •  📍 {self.user['city']}",
+                     font=FONT_SMALL, text_color="#dbeafe").pack(side="left", anchor="w", padx=(12, 0))
+
+        # Notification badge
+        unseen_r = run_select("SELECT COUNT(*) as c FROM notifications WHERE user_id=%s AND seen=0",
+                              (self.user["id"],))
+        notif_n  = unseen_r[0]["c"] if unseen_r else 0
+
+        ctk.CTkButton(hc, text=f"🔔  {notif_n} new" if notif_n else "🔔  Notifications",
+                      font=FONT_SMALL, fg_color="#1d4ed8" if notif_n else "transparent",
+                      text_color="#fff", hover_color="#a1acd1",
+                      width=130, height=34, corner_radius=8,
+                      command=self.show_notifications).pack(side="right", padx=6)
+        ctk.CTkButton(hc, text="Sign Out", font=FONT_SMALL,
+                      fg_color=COLOR_DANGER, text_color="#fff",
+                      hover_color="#dc2626", width=90, height=34, corner_radius=8,
+                      command=self.do_logout).pack(side="right", padx=6)
+
+        # Nav strip
+        nav = ctk.CTkFrame(root, fg_color=COLOR_SIDEBAR, height=50)
+        nav.pack(fill="x")
+        nav.pack_propagate(False)
+        nc = ctk.CTkFrame(nav, fg_color="transparent")
+        nc.pack(fill="both", expand=True, padx=16, pady=8)
+
+        def nav_b(text, cmd, accent_color=None):
+            ctk.CTkButton(nc, text=text, font=FONT_SMALL,
+                          fg_color=accent_color or "transparent",
+                          text_color="#e2e8f0", hover_color="#334155",
+                          height=34, corner_radius=7, command=cmd).pack(side="left", padx=3)
+
+        nav_b("🏠 Dashboard", self.show_dashboard)
+        nav_b("📅 Browse Events", self.show_events)
+        nav_b("🏢 NGO Directory", self.show_directory)
+        if self.user["role"] == "NGO":
+            nav_b("➕ Post Event", self.show_post_event, COLOR_SUCCESS)
+            nav_b("📋 My Events", self.show_my_events)
+        else:
+            nav_b("📋 My Registrations", self.show_my_registrations)
+            nav_b("🏅 My NGOs", self.show_my_ngos)
+        nav_b("👤 Profile", self.show_profile)
+
+        # Scrollable content
+        scroll = CTkScrollableFrame(root, fg_color=COLOR_BG)
+        scroll.pack(fill="both", expand=True, padx=32, pady=24)
+
+        # ── STATS ROW ─────────────────────────────────────────────────────────
+        section_title(scroll, "📊  Your Overview")
+        stats_row = ctk.CTkFrame(scroll, fg_color="transparent")
+        stats_row.pack(fill="x", pady=(6, 0))
+
+        if self.user["role"] == "Volunteer":
+            ev_j  = run_select("SELECT COUNT(*) as c FROM event_participants WHERE user_id=%s", (self.user["id"],))
+            ng_j  = run_select("SELECT COUNT(*) as c FROM ngo_members WHERE user_id=%s", (self.user["id"],))
+            hrs_r = run_select("SELECT COALESCE(SUM(hours_logged),0) as h FROM event_participants WHERE user_id=%s", (self.user["id"],))
+            stat_tile(stats_row, "📅", ev_j[0]["c"] if ev_j else 0, "Events Joined", COLOR_ACCENT)
+            stat_tile(stats_row, "🏢", ng_j[0]["c"] if ng_j else 0, "NGOs Joined", COLOR_SUCCESS)
+            stat_tile(stats_row, "⏱️", f"{hrs_r[0]['h']:.1f}h" if hrs_r else "0h", "Volunteer Hours", COLOR_WARNING)
+            stat_tile(stats_row, "🔔", notif_n, "Unread Notifications", COLOR_DANGER if notif_n else COLOR_TEXT_SEC)
+        else:
+            ngo = run_select("SELECT * FROM ngos WHERE email=%s", (self.user["email"],))
+            if ngo:
+                nid = ngo[0]["id"]
+                ev_c  = run_select("SELECT COUNT(*) as c FROM events WHERE ngo_id=%s AND cancelled=0", (nid,))
+                vc    = run_select("SELECT COUNT(DISTINCT ep.user_id) as c FROM event_participants ep JOIN events e ON ep.event_id=e.id WHERE e.ngo_id=%s", (nid,))
+                mc    = run_select("SELECT COUNT(*) as c FROM ngo_members WHERE ngo_id=%s", (nid,))
+                stat_tile(stats_row, "📅", ev_c[0]["c"] if ev_c else 0, "Events Posted", COLOR_ACCENT)
+                stat_tile(stats_row, "👥", vc[0]["c"] if vc else 0,  "Total Volunteers", COLOR_SUCCESS)
+                stat_tile(stats_row, "🏅", mc[0]["c"] if mc else 0,  "NGO Members", COLOR_WARNING)
+                stat_tile(stats_row, "🔔", notif_n, "Notifications", COLOR_DANGER if notif_n else COLOR_TEXT_SEC)
+
+        # ── QUICK ACTIONS ─────────────────────────────────────────────────────
+        section_title(scroll, "⚡  Quick Actions")
+        qa = ctk.CTkFrame(scroll, fg_color="transparent")
+        qa.pack(fill="x", pady=(0, 8))
+
+        def qa_btn(text, cmd, color):
+            ctk.CTkButton(qa, text=text, font=FONT_SUBHEADING,
+                          fg_color=color, text_color="#fff",
+                          width=160, height=42, corner_radius=10,
+                          command=cmd).pack(side="left", padx=(0, 10))
+
+        if self.user["role"] == "NGO":
+            qa_btn("➕ Post New Event", self.show_post_event, COLOR_SUCCESS)
+            qa_btn("📋 View My Events", self.show_my_events, COLOR_ACCENT)
+        else:
+            qa_btn("📅 Browse Events", self.show_events, COLOR_ACCENT)
+            qa_btn("🏢 Find NGOs", self.show_directory, COLOR_SUCCESS)
+            qa_btn("📋 My Registrations", self.show_my_registrations, COLOR_WARNING)
+
+        # ── RECENT EVENTS ─────────────────────────────────────────────────────
+        section_title(scroll, "📅  Recent Events")
+        recent = run_select(
+            "SELECT e.*,n.name as ngo_name FROM events e "
+            "JOIN ngos n ON e.ngo_id=n.id "
+            "WHERE e.cancelled=0 ORDER BY e.created_at DESC LIMIT 5"
+        )
+        if not recent:
+            c = card(scroll, fill="x", pady=6)
+            ctk.CTkLabel(c, text="No events posted yet. "
+                                 + ("Use '+ Post Event' to publish your first event!" if self.user["role"]=="NGO" else "Check back soon — NGOs are getting set up!"),
+                         font=FONT_BODY, text_color=COLOR_TEXT_SEC).pack(padx=16, pady=20)
+        else:
+            for ev in recent:
+                self._mini_event_row(scroll, ev)
+
+        ctk.CTkButton(scroll, text="See All Events →", font=FONT_SUBHEADING,
+                      fg_color=COLOR_LIGHT_BLUE, text_color=COLOR_ACCENT, hover_color="#bbc3da",
+                      width=160, height=38, corner_radius=10,
+                      command=self.show_events).pack(anchor="w", pady=(10, 0))
+
+        # ── HELP / GUIDE ──────────────────────────────────────────────────────
+        section_title(scroll, "❓  How to Use This Platform")
+        guide_card = card(scroll, fill="x", pady=6)
+        gf = ctk.CTkFrame(guide_card, fg_color="transparent")
+        gf.pack(fill="x", padx=20, pady=16)
+        if self.user["role"] == "Volunteer":
+            tips = [
+                ("📅 Browse Events", "Click 'Browse Events' in the nav to see all upcoming volunteer opportunities. Filter by city or category."),
+                ("🏢 Join an NGO",   "Go to 'NGO Directory', find an NGO you like, and click 'Join NGO' to become a member. You'll be notified of their new events."),
+                ("📋 My Registrations", "After joining an event, find it under 'My Registrations'. Your check-in status and hours logged by the NGO appear here."),
+                ("👤 Your Profile",  "Edit your name, city, skills, or password anytime under 'Profile'."),
+            ]
+        else:
+            tips = [
+                ("➕ Post an Event",  "Click '+ Post Event' to create a new volunteer opportunity. Fill in the date, location, max capacity, and requirements."),
+                ("👥 View Volunteers", "In 'My Events', click 'Volunteers' on any event to see who registered, mark check-ins, and log hours."),
+                ("🏢 Members vs Volunteers", "Volunteers who click 'Join NGO' on your directory listing become your long-term members. Volunteers who register for specific events appear in that event's list."),
+                ("🔔 Notifications", "You'll automatically receive a notification whenever a volunteer joins your event or becomes a member."),
+            ]
+        for title_t, body_t in tips:
+            tf = ctk.CTkFrame(gf, fg_color="#f0f9ff", corner_radius=8)
+            tf.pack(fill="x", pady=4)
+            tfi = ctk.CTkFrame(tf, fg_color="transparent")
+            tfi.pack(fill="x", padx=14, pady=8)
+            ctk.CTkLabel(tfi, text=title_t, font=FONT_SUBHEADING, text_color=COLOR_TEXT).pack(anchor="w")
+            ctk.CTkLabel(tfi, text=body_t, font=FONT_BODY, text_color=COLOR_TEXT_SEC,
+                         wraplength=860, justify="left").pack(anchor="w", pady=(2, 0))
+
+    def _mini_event_row(self, parent, ev):
+        c = card(parent, fill="x", pady=5)
+        f = ctk.CTkFrame(c, fg_color="transparent")
+        f.pack(fill="x", padx=16, pady=10)
+        ctk.CTkLabel(f, text=ev["title"], font=FONT_SUBHEADING, text_color=COLOR_TEXT).pack(anchor="w")
+        ctk.CTkLabel(f, text=f"📅 {ev['edate']}   📍 {ev['location']}   🏢 {ev['ngo_name']}",
+                     font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(anchor="w", pady=(2, 0))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BROWSE EVENTS
+    # ─────────────────────────────────────────────────────────────────────────
+    def show_events(self, search="", fcity="", fcat=""):
+        self.clear()
+        root = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        root.pack(fill="both", expand=True)
+
+        def right_widgets(parent):
+            if self.user["role"] == "NGO":
+                ctk.CTkButton(parent, text="➕ Post Event", font=FONT_SUBHEADING,
+                              fg_color="#ffffff", hover_color="#e2e8f0", text_color=COLOR_ACCENT,
+                              width=130, height=36, corner_radius=8,
+                              command=self.show_post_event).pack(side="left", padx=4)
+
+        top_nav(root, "📅  Browse Events", self.show_dashboard, [right_widgets])
+
+        # Filter bar
+        fb = ctk.CTkFrame(root, fg_color=COLOR_CARD, height=68,
+                          border_width=1, border_color=COLOR_BORDER)
+        fb.pack(fill="x")
+        fb.pack_propagate(False)
+        fc = ctk.CTkFrame(fb, fg_color="transparent")
+        fc.pack(fill="both", expand=True, padx=24)
+
+        s_e  = ctk.CTkEntry(fc, placeholder_text="🔍  Search by title, NGO, description…",
+                            font=FONT_BODY, height=36, width=280, corner_radius=8)
+        s_e.pack(side="left", padx=(0, 8), pady=16)
+        if search: s_e.insert(0, search)
+
+        cy_e = ctk.CTkEntry(fc, placeholder_text="📍 City", font=FONT_BODY,
+                            height=36, width=140, corner_radius=8)
+        cy_e.pack(side="left", padx=(0, 8), pady=16)
+        if fcity: cy_e.insert(0, fcity)
+
+        cat_cb = ctk.CTkComboBox(fc, values=["All Categories"] + CATEGORIES,
+                                 font=FONT_BODY, height=36, width=180,
+                                 corner_radius=8, state="readonly")
+        cat_cb.set(fcat or "All Categories")
+        cat_cb.pack(side="left", padx=(0, 8), pady=16)
+
+        def do_search():
+            self.show_events(s_e.get().strip(), cy_e.get().strip(), cat_cb.get())
+
+        ctk.CTkButton(fc, text="Search", font=FONT_SUBHEADING, fg_color=COLOR_ACCENT,
+                      text_color="#fff", width=90, height=36, corner_radius=8,
+                      command=do_search).pack(side="left", pady=16)
+        ctk.CTkButton(fc, text="Clear", font=FONT_SMALL, fg_color=COLOR_LIGHT_BLUE,
+                      text_color=COLOR_ACCENT, width=70, height=36, corner_radius=8,
+                      command=self.show_events).pack(side="left", padx=6, pady=16)
+
+        # Build SQL
+        sql = ("SELECT e.*, n.name AS ngo_name, "
+               "(SELECT COUNT(*) FROM event_participants ep WHERE ep.event_id=e.id) AS joined "
+               "FROM events e JOIN ngos n ON e.ngo_id=n.id WHERE e.cancelled=0")
+        args = []
+        if search:
+            sql += " AND (e.title LIKE %s OR e.description LIKE %s OR n.name LIKE %s)"
+            args += [f"%{search}%", f"%{search}%", f"%{search}%"]
+        if fcity:
+            sql += " AND (e.location LIKE %s OR n.city LIKE %s)"
+            args += [f"%{fcity}%", f"%{fcity}%"]
+        if fcat and fcat != "All Categories":
+            sql += " AND e.category=%s"
+            args.append(fcat)
+        sql += " ORDER BY e.created_at DESC LIMIT 60"
+        events = run_select(sql, args)
+
+        scroll = CTkScrollableFrame(root, fg_color=COLOR_BG)
+        scroll.pack(fill="both", expand=True, padx=28, pady=18)
+        inner = ctk.CTkFrame(scroll, fg_color="transparent")
+        inner.pack(fill="both", expand=True)
+
+        if not events:
+            c = card(inner, fill="x", pady=20)
+            ctk.CTkLabel(c, text="No events found 📭",
+                         font=FONT_HEADING, text_color=COLOR_TEXT_SEC).pack(pady=30)
+        else:
+            ctk.CTkLabel(inner, text=f"{len(events)} event(s) found",
+                         font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(anchor="w", pady=(0, 6))
+            for ev in events:
+                self._event_card(inner, ev)
+
+    def _event_card(self, parent, ev):
+        c = card(parent, fill="x", pady=7)
+        f = ctk.CTkFrame(c, fg_color="transparent")
+        f.pack(fill="x", padx=18, pady=14)
+
+        # Title row
+        tr = ctk.CTkFrame(f, fg_color="transparent")
+        tr.pack(fill="x")
+        ctk.CTkLabel(tr, text=ev["title"], font=FONT_SUBHEADING, text_color=COLOR_TEXT).pack(side="left")
+        if ev.get("category"):
+            ctk.CTkLabel(tr, text=f"  {ev['category']} ", font=FONT_SMALL,
+                         text_color=COLOR_ACCENT, fg_color="#dbeafe",
+                         corner_radius=5).pack(side="left", padx=8)
+
+        # Meta
+        time_str = f"  ⏰ {ev['etime']}" if ev.get("etime") else ""
+        ctk.CTkLabel(f, text=f"📅 {ev['edate']}{time_str}   📍 {ev['location']}   🏢 {ev['ngo_name']}   👥 {ev['joined']} registered",
+                     font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(anchor="w", pady=(4, 6))
+
+        # Description
+        desc = (ev.get("description") or "")
+        short = desc[:200] + ("…" if len(desc) > 200 else "")
+        ctk.CTkLabel(f, text=short, font=FONT_BODY, text_color=COLOR_TEXT_SEC,
+                     wraplength=800, justify="left").pack(anchor="w", pady=(0, 6))
+
+        # Requirements
+        if ev.get("requirements"):
+            ctk.CTkLabel(f, text=f"📋 Requirements: {ev['requirements']}",
+                         font=FONT_SMALL, text_color=COLOR_WARNING).pack(anchor="w", pady=(0, 6))
+
+        # Spots
+        if ev.get("max_volunteers") and ev["max_volunteers"] > 0:
+            left = max(0, ev["max_volunteers"] - ev["joined"])
+            col  = COLOR_SUCCESS if left > 5 else (COLOR_WARNING if left > 0 else COLOR_DANGER)
+            ctk.CTkLabel(f, text=f"Spots remaining: {left} / {ev['max_volunteers']}",
+                         font=FONT_SMALL, text_color=col).pack(anchor="w", pady=(0, 8))
+
+        # Action buttons
+        if self.user["role"] == "Volunteer":
+            br = ctk.CTkFrame(f, fg_color="transparent")
+            br.pack(anchor="e")
+            already = run_select("SELECT id FROM event_participants WHERE event_id=%s AND user_id=%s",
+                                 (ev["id"], self.user["id"]))
+            if already:
+                ctk.CTkLabel(br, text="✅ Registered", font=FONT_SMALL, text_color=COLOR_SUCCESS).pack(side="left", padx=(0, 10))
+                ctk.CTkButton(br, text="Cancel Registration", font=FONT_SMALL,
+                              fg_color=COLOR_DANGER, text_color="#fff",
+                              width=140, height=32, corner_radius=8,
+                              command=lambda eid=ev["id"]: self._cancel_reg(eid)).pack(side="left")
+            else:
+                full = ev.get("max_volunteers", 0) > 0 and ev["joined"] >= ev["max_volunteers"]
+                if full:
+                    ctk.CTkLabel(br, text="⛔ Event Full", font=FONT_SMALL, text_color=COLOR_DANGER).pack(side="left")
+                else:
+                    ctk.CTkButton(br, text="Join Event ✓", font=FONT_SMALL,
+                                  fg_color=COLOR_ACCENT, text_color="#fff",
+                                  width=110, height=32, corner_radius=8,
+                                  command=lambda e=ev: self._join_event(e)).pack(side="left")
+        else:
+            ngo = run_select("SELECT id FROM ngos WHERE email=%s", (self.user["email"],))
+            if ngo and ngo[0]["id"] == ev["ngo_id"]:
+                br = ctk.CTkFrame(f, fg_color="transparent")
+                br.pack(anchor="e")
+                ctk.CTkButton(br, text="👥 Volunteers", font=FONT_SMALL,
+                              fg_color=COLOR_SUCCESS, text_color="#fff",
+                              width=110, height=32, corner_radius=8,
+                              command=lambda e=ev: self.show_event_volunteers(e)).pack(side="left", padx=(0, 6))
+                ctk.CTkButton(br, text="✏️ Edit", font=FONT_SMALL,
+                              fg_color=COLOR_LIGHT_BLUE, text_color=COLOR_ACCENT,
+                              width=70, height=32, corner_radius=8,
+                              command=lambda e=ev: self.show_edit_event(e)).pack(side="left", padx=(0, 6))
+                ctk.CTkButton(br, text="🗑 Cancel Event", font=FONT_SMALL,
+                              fg_color=COLOR_DANGER, text_color="#fff",
+                              width=110, height=32, corner_radius=8,
+                              command=lambda e=ev: self._cancel_event(e)).pack(side="left")
+    def _join_event(self, ev):
+        if run_lastid("INSERT INTO event_participants (event_id,user_id) VALUES (%s,%s)",
+                      (ev["id"], self.user["id"])) is not None:
+            # Notify NGO
+            ng = run_select("SELECT email FROM ngos WHERE id=%s", (ev["ngo_id"],))
+            if ng:
+                nu = run_select("SELECT id FROM users WHERE email=%s", (ng[0]["email"],))
+                if nu:
+                    notify(nu[0]["id"], f"🎉 {self.user['name']} registered for your event: '{ev['title']}'", "join")
+            messagebox.showinfo("Joined! 🎉",
+                                f"You're registered for:\n{ev['title']}\n\n📅 {ev['edate']}\n📍 {ev['location']}")
+            self.show_events()
+        else:
+            messagebox.showerror("Error", "Could not join. You may already be registered.")
+
+    def _cancel_reg(self, event_id):
+        ev = run_select("SELECT title FROM events WHERE id=%s", (event_id,))
+        name = ev[0]["title"] if ev else "this event"
+        if messagebox.askyesno("Cancel Registration", f"Cancel your registration for:\n'{name}'?"):
+            run_exec("DELETE FROM event_participants WHERE event_id=%s AND user_id=%s",
+                     (event_id, self.user["id"]))
+            messagebox.showinfo("Cancelled", "Registration cancelled.")
+            self.show_events()
+
+    def _cancel_event(self, ev):
+        ngo = run_select("SELECT id FROM ngos WHERE email=%s", (self.user["email"],))
+        if not ngo or ngo[0]["id"] != ev["ngo_id"]:
+            messagebox.showerror("Unauthorised", "You can only cancel your own events.")
+            return
+        if messagebox.askyesno("Cancel Event", f"Cancel '{ev['title']}'?\n\nAll registered volunteers will be notified."):
+            run_exec("UPDATE events SET cancelled=1 WHERE id=%s", (ev["id"],))  
+            vols = run_select("SELECT user_id FROM event_participants WHERE event_id=%s", (ev["id"],))
+            for v in vols:
+                notify(v["user_id"], f"⚠️ Event '{ev['title']}' has been cancelled by the organiser.", "cancel")
+            messagebox.showinfo("Cancelled", "Event cancelled. Volunteers notified.")
+            self.show_events()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # EVENT VOLUNTEERS (NGO view)
+    # ─────────────────────────────────────────────────────────────────────────
+    def show_event_volunteers(self, ev):
+        self.clear()
+        root = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        root.pack(fill="both", expand=True)
+        top_nav(root, f"👥  Volunteers — {ev['title'][:55]}", self.show_events)
+
+        scroll = CTkScrollableFrame(root, fg_color=COLOR_BG)
+        scroll.pack(fill="both", expand=True, padx=28, pady=18)
+        inner = ctk.CTkFrame(scroll, fg_color="transparent")
+        inner.pack(fill="both", expand=True)
+
+        vols = run_select(
+            "SELECT u.name,u.email,u.phone,u.city,u.skills,"
+            "ep.id AS ep_id, ep.joined_at, ep.checked_in, ep.hours_logged "
+            "FROM event_participants ep JOIN users u ON ep.user_id=u.id "
+            "WHERE ep.event_id=%s ORDER BY ep.joined_at", (ev["id"],)
+        )
+        ctk.CTkLabel(inner, text=f"Total Registered: {len(vols)}",
+                     font=FONT_SUBHEADING, text_color=COLOR_TEXT).pack(anchor="w", pady=(0, 14))
+
+        if not vols:
+            c = card(inner, fill="x", pady=10)
+            ctk.CTkLabel(c, text="No volunteers have registered yet.",
+                         font=FONT_BODY, text_color=COLOR_TEXT_SEC).pack(pady=20)
+        else:
+            for v in vols:
+                vc = card(inner, fill="x", pady=5)
+                vf = ctk.CTkFrame(vc, fg_color="transparent")
+                vf.pack(fill="x", padx=16, pady=10)
+
+                lv = ctk.CTkFrame(vf, fg_color="transparent")
+                lv.pack(side="left", fill="both", expand=True)
+                ctk.CTkLabel(lv, text=f"👤  {v['name']}", font=FONT_SUBHEADING, text_color=COLOR_TEXT).pack(anchor="w")
+                ctk.CTkLabel(lv, text=f"✉  {v['email']}   📞  {v['phone']}   📍  {v['city']}",
+                             font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(anchor="w", pady=(2, 0))
+                if v.get("skills"):
+                    ctk.CTkLabel(lv, text=f"🛠  {v['skills']}",
+                                 font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(anchor="w")
+                ctk.CTkLabel(lv, text=f"Registered: {str(v['joined_at'])[:16]}",
+                             font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(anchor="w")
+
+                rv = ctk.CTkFrame(vf, fg_color="transparent")
+                rv.pack(side="right", padx=(12, 0))
+                status = "✅ Checked In" if v["checked_in"] else "⏳ Not Checked In"
+                sc     = COLOR_SUCCESS if v["checked_in"] else COLOR_WARNING
+                ctk.CTkLabel(rv, text=status, font=FONT_SMALL, text_color=sc).pack()
+                ctk.CTkLabel(rv, text=f"Hours Logged: {v['hours_logged']:.1f}",
+                             font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(pady=(4, 8))
+
+                if not v["checked_in"]:
+                    ctk.CTkButton(rv, text="✔ Mark Check-In", font=FONT_SMALL,
+                                  fg_color=COLOR_SUCCESS, text_color="#fff",
+                                  width=130, height=30, corner_radius=8,
+                                  command=lambda ep=v["ep_id"]: [
+                                      run_exec("UPDATE event_participants SET checked_in=1 WHERE id=%s", (ep,)),
+                                      self.show_event_volunteers(ev)
+                                  ]).pack()
+                else:
+                    ctk.CTkButton(rv, text="⏱ Log Hours", font=FONT_SMALL,
+                                  fg_color=COLOR_WARNING, text_color="#fff",
+                                  width=130, height=30, corner_radius=8,
+                                  command=lambda ep=v["ep_id"]: self._log_hours(ep, ev)).pack()
+
+    def _log_hours(self, ep_id, ev):
+        win = ctk.CTkToplevel(self)
+        win.title("Log Volunteer Hours")
+        win.geometry("340x210")
+        win.grab_set()
+        ctk.CTkLabel(win, text="Log Hours", font=FONT_HEADING, text_color=COLOR_TEXT).pack(pady=(20, 8))
+        ctk.CTkLabel(win, text="How many hours did this volunteer contribute?",
+                     font=FONT_SMALL, text_color=COLOR_TEXT_SEC, wraplength=280).pack()
+        he = ctk.CTkEntry(win, placeholder_text="e.g. 4.5", font=FONT_BODY, width=200, height=38)
+        he.pack(pady=10)
+
+        def save():
+            h_str = he.get().strip()
+            if not h_str.replace(".", "", 1).isdigit():
+                messagebox.showerror("Invalid", "Enter a valid positive number.", parent=win)
+                return
+            h = float(h_str)
+            if h < 0:
+                messagebox.showerror("Invalid", "Hours cannot be negative.", parent=win)
+                return
+            run_exec("UPDATE event_participants SET hours_logged=%s WHERE id=%s", (h, ep_id))
+            win.destroy()
+            self.show_event_volunteers(ev)
+
+        ctk.CTkButton(win, text="Save", font=FONT_SUBHEADING,
+                      fg_color=COLOR_SUCCESS, text_color="#fff",
+                      width=140, height=38, command=save).pack(pady=6)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # POST EVENT
+    # ─────────────────────────────────────────────────────────────────────────
+    def show_post_event(self):
+        self.clear()
+        root = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        root.pack(fill="both", expand=True)
+        top_nav(root, "➕  Post New Event", self.show_dashboard)
+
+        scroll = CTkScrollableFrame(root, fg_color=COLOR_BG)
+        scroll.pack(fill="both", expand=True)
+        wrap = card(scroll, fill="both", padx=120, pady=20)
+        fi = ctk.CTkFrame(wrap, fg_color="transparent")
+        fi.pack(fill="both", padx=36, pady=28)
+
+        ctk.CTkLabel(fi, text="Create a New Volunteer Event",
+                     font=FONT_HEADING, text_color=COLOR_TEXT).pack(anchor="w", pady=(0, 16))
+
+        title_e = field(fi, "Event Title *", "e.g. Community Tree Plantation Drive")
+        loc_e   = field(fi, "Location *", "e.g. Cubbon Park, Bengaluru")
+        date_e  = field(fi, "Date *", "DD-MM-YYYY  e.g. 25-04-2026")
+        time_e  = field(fi, "Time (optional)", "e.g. 09:00 AM  or  09:00 AM - 01:00 PM")
+
+        ctk.CTkLabel(fi, text="Category *", font=FONT_SMALL, text_color=COLOR_TEXT).pack(anchor="w", pady=(0, 3))
+        cat_cb = ctk.CTkComboBox(fi, values=CATEGORIES, font=FONT_BODY,
+                                 height=38, corner_radius=8, state="readonly")
+        cat_cb.set("Environment")
+        cat_cb.pack(fill="x", pady=(0, 10))
+
+        max_e   = field(fi, "Maximum Volunteers (0 = no limit)", "e.g. 50")
+        reqs_e  = field(fi, "Requirements / Skills Needed (optional)",
+                        "e.g. Physical fitness, Comfortable outdoors")
+
+        ctk.CTkLabel(fi, text="Description * — Tell volunteers what they'll be doing",
+                     font=FONT_SMALL, text_color=COLOR_TEXT).pack(anchor="w", pady=(0, 3))
+        desc_tb = ctk.CTkTextbox(fi, font=FONT_BODY, height=110, corner_radius=8)
+        desc_tb.pack(fill="x", pady=(0, 12))
+
+        err = ctk.CTkLabel(fi, text="", font=FONT_SMALL, text_color=COLOR_DANGER)
+        err.pack()
+
+        def post():
+            t  = title_e.get().strip()
+            lo = loc_e.get().strip()
+            d  = date_e.get().strip()
+            ti = time_e.get().strip()
+            de = desc_tb.get("1.0", "end").strip()
+            mv = max_e.get().strip() or "0"
+            rq = reqs_e.get().strip()
+            if not validate_date(d):
+                err.configure(text="Date must be in DD-MM-YYYY format (e.g. 25-04-2026)."); return
+            if ti and not validate_time(ti):
+                err.configure(text="Time must be HH:MM AM/PM or a range like 09:00 AM - 01:00 PM."); return
+            if not all([t, lo, d, de]):
+                err.configure(text="Please fill all required fields (*)."); return
+            try:
+                mv_i = int(mv)
+            except ValueError:
+                err.configure(text="'Maximum Volunteers' must be a whole number."); return
+            ngo = run_select("SELECT id FROM ngos WHERE email=%s", (self.user["email"],))
+            if not ngo:
+                err.configure(text="NGO profile not found. Please contact support."); return
+
+            eid = run_lastid(
+                "INSERT INTO events (ngo_id,title,edate,etime,location,max_volunteers,category,description,requirements,created_at,cancelled) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0)",
+                (ngo[0]["id"], t, d, ti, lo, mv_i, cat_cb.get(), de, rq, now_iso())
+            )
+            if eid:
+                # Notify NGO members
+                mems = run_select("SELECT user_id FROM ngo_members WHERE ngo_id=%s", (ngo[0]["id"],))
+                for m in mems:
+                    notify(m["user_id"], f"📅 New event from {self.user['name']}: '{t}' on {d}", "event")
+                messagebox.showinfo("Event Published! 🎉",
+                                    f"'{t}' is now live!\n\nVolunteers can see and register for it immediately.")
+                self.show_events()
+            else:
+                err.configure(text="Failed to post event. Please try again.")
+
+        bf = ctk.CTkFrame(fi, fg_color="transparent")
+        bf.pack(fill="x", pady=(10, 0))
+        ctk.CTkButton(bf, text="Publish Event", font=FONT_SUBHEADING,
+                      fg_color=COLOR_SUCCESS, text_color="#fff",
+                      width=150, height=42, corner_radius=10, command=post).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(bf, text="Cancel", font=FONT_SUBHEADING,
+                      fg_color=COLOR_LIGHT_BLUE, text_color=COLOR_ACCENT,
+                      width=100, height=42, corner_radius=10,
+                      command=self.show_dashboard).pack(side="left")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # EDIT EVENT
+    # ─────────────────────────────────────────────────────────────────────────
+    def show_edit_event(self, ev):
+        self.clear()
+        root = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        root.pack(fill="both", expand=True)
+        top_nav(root, "✏️  Edit Event", self.show_events)
+
+        scroll = CTkScrollableFrame(root, fg_color=COLOR_BG)
+        scroll.pack(fill="both", expand=True)
+        wrap = card(scroll, fill="both", padx=120, pady=20)
+        fi = ctk.CTkFrame(wrap, fg_color="transparent")
+        fi.pack(fill="both", padx=36, pady=28)
+
+        def prefill(widget, val):
+            widget.insert(0, val or "")
+
+        title_e = field(fi, "Event Title *", "")
+        prefill(title_e, ev.get("title"))
+        loc_e = field(fi, "Location *", "")
+        prefill(loc_e, ev.get("location"))
+        date_e = field(fi, "Date *", "DD-MM-YYYY  e.g. 25-04-2026")
+        prefill(date_e, ev.get("edate"))
+        time_e = field(fi, "Time (optional)", "e.g. 09:00 AM  or  09:00 AM - 01:00 PM")
+        prefill(time_e, ev.get("etime"))
+
+        ctk.CTkLabel(fi, text="Category *", font=FONT_SMALL, text_color=COLOR_TEXT).pack(anchor="w", pady=(0, 3))
+        cat_cb = ctk.CTkComboBox(fi, values=CATEGORIES, font=FONT_BODY,
+                                 height=38, corner_radius=8, state="readonly")
+        cat_cb.set(ev.get("category") or CATEGORIES[0])
+        cat_cb.pack(fill="x", pady=(0, 10))
+
+        max_e  = field(fi, "Max Volunteers (0 = no limit)", "")
+        prefill(max_e, str(ev.get("max_volunteers", 0)))
+        reqs_e = field(fi, "Requirements", "")
+        prefill(reqs_e, ev.get("requirements"))
+
+        ctk.CTkLabel(fi, text="Description *", font=FONT_SMALL, text_color=COLOR_TEXT).pack(anchor="w", pady=(0, 3))
+        desc_tb = ctk.CTkTextbox(fi, font=FONT_BODY, height=110, corner_radius=8)
+        desc_tb.pack(fill="x", pady=(0, 12))
+        desc_tb.insert("1.0", ev.get("description") or "")
+
+        err = ctk.CTkLabel(fi, text="", font=FONT_SMALL, text_color=COLOR_DANGER)
+        err.pack()
+
+        def save():
+            t  = title_e.get().strip(); lo = loc_e.get().strip()
+            d  = date_e.get().strip(); de = desc_tb.get("1.0", "end").strip()
+            ti = time_e.get().strip(); mv = max_e.get().strip() or "0"
+            rq = reqs_e.get().strip()
+            if not validate_date(d):
+                err.configure(text="Date must be in DD-MM-YYYY format (e.g. 25-04-2026)."); return
+            if ti and not validate_time(ti):
+                err.configure(text="Time must be HH:MM AM/PM or a range like 09:00 AM - 01:00 PM."); return
+            if not all([t, lo, d, de]):
+                err.configure(text="Please fill all required fields (*)."); return
+            try: mv_i = int(mv)
+            except ValueError:
+                err.configure(text="Max Volunteers must be a number."); return
+    
+            # Ownership guard
+            ngo = run_select("SELECT id FROM ngos WHERE email=%s", (self.user["email"],))
+            if not ngo or ngo[0]["id"] != ev["ngo_id"]:
+                err.configure(text="Unauthorised: You don't own this event.")
+                return
+
+            if run_exec(
+                "UPDATE events SET title=%s,location=%s,edate=%s,etime=%s,category=%s,"
+                "max_volunteers=%s,requirements=%s,description=%s WHERE id=%s",
+                (t, lo, d, ti, cat_cb.get(), mv_i, rq, de, ev["id"])
+            ):
+                messagebox.showinfo("Saved ✓", "Event updated successfully!")
+                self.show_events()
+            else:
+                err.configure(text="Update failed. Please try again.")
+
+        bf = ctk.CTkFrame(fi, fg_color="transparent")
+        bf.pack(fill="x", pady=(10, 0))
+        ctk.CTkButton(bf, text="Save Changes", font=FONT_SUBHEADING,
+                      fg_color=COLOR_SUCCESS, text_color="#fff",
+                      width=150, height=42, corner_radius=10, command=save).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(bf, text="Cancel", font=FONT_SUBHEADING,
+                      fg_color=COLOR_LIGHT_BLUE, text_color=COLOR_ACCENT,
+                      width=100, height=42, corner_radius=10,
+                      command=self.show_events).pack(side="left")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # MY EVENTS (NGO)
+    # ─────────────────────────────────────────────────────────────────────────
+    def show_my_events(self):
+        self.clear()
+        root = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        root.pack(fill="both", expand=True)
+
+        def rw(p):
+            ctk.CTkButton(p, text="➕ Post New Event", font=FONT_SUBHEADING,
+                          fg_color="#ffffff", hover_color="#e2e8f0", text_color=COLOR_ACCENT,
+                          width=150, height=36, corner_radius=8,
+                          command=self.show_post_event).pack(side="left", padx=4)
+        top_nav(root, "📋  My Events", self.show_dashboard, [rw])
+
+        scroll = CTkScrollableFrame(root, fg_color=COLOR_BG)
+        scroll.pack(fill="both", expand=True, padx=28, pady=18)
+        inner = ctk.CTkFrame(scroll, fg_color="transparent")
+        inner.pack(fill="both", expand=True)
+
+        ngo = run_select("SELECT id FROM ngos WHERE email=%s", (self.user["email"],))
+        if not ngo:
+            ctk.CTkLabel(inner, text="NGO profile not found.",
+                         font=FONT_BODY, text_color=COLOR_DANGER).pack(pady=20)
+            return
+
+        rows = run_select(
+            "SELECT e.*, (SELECT COUNT(*) FROM event_participants ep WHERE ep.event_id=e.id) AS vc "
+            "FROM events e WHERE e.ngo_id=%s ORDER BY e.created_at DESC",
+            (ngo[0]["id"],)
+        )
+        if not rows:
+            c = card(inner, fill="x", pady=10)
+            ctk.CTkLabel(c, text="You haven't posted any events yet.\nClick '+ Post New Event' to create your first one!",
+                         font=FONT_BODY, text_color=COLOR_TEXT_SEC, justify="center").pack(pady=24)
+        else:
+            for ev in rows:
+                bg = "#fef2f2" if ev["cancelled"] else COLOR_CARD
+                c = ctk.CTkFrame(inner, fg_color=bg, corner_radius=12,
+                                 border_width=1, border_color=COLOR_BORDER)
+                c.pack(fill="x", pady=6)
+                f = ctk.CTkFrame(c, fg_color="transparent")
+                f.pack(fill="x", padx=16, pady=12)
+                tr = ctk.CTkFrame(f, fg_color="transparent")
+                tr.pack(fill="x")
+                ctk.CTkLabel(tr, text=ev["title"], font=FONT_SUBHEADING, text_color=COLOR_TEXT).pack(side="left")
+                sc = "🚫 Cancelled" if ev["cancelled"] else "✅ Active"
+                scol = COLOR_DANGER if ev["cancelled"] else COLOR_SUCCESS
+                ctk.CTkLabel(tr, text=sc, font=FONT_SMALL, text_color=scol).pack(side="right")
+                ctk.CTkLabel(f, text=f"📅 {ev['edate']}   📍 {ev['location']}   👥 {ev['vc']} volunteers",
+                             font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(anchor="w", pady=(4, 0))
+                if not ev["cancelled"]:
+                    br = ctk.CTkFrame(f, fg_color="transparent")
+                    br.pack(anchor="e", pady=(8, 0))
+                    ctk.CTkButton(br, text="👥 Volunteers", font=FONT_SMALL,
+                                  fg_color=COLOR_SUCCESS, text_color="#fff",
+                                  width=110, height=30, corner_radius=8,
+                                  command=lambda e=ev: self.show_event_volunteers(e)).pack(side="left", padx=(0, 6))
+                    ctk.CTkButton(br, text="✏️ Edit", font=FONT_SMALL,
+                                  fg_color=COLOR_LIGHT_BLUE, text_color=COLOR_ACCENT,
+                                  width=70, height=30, corner_radius=8,
+                                  command=lambda e=ev: self.show_edit_event(e)).pack(side="left", padx=(0, 6))
+                    ctk.CTkButton(br, text="🗑 Cancel", font=FONT_SMALL,
+                                  fg_color=COLOR_DANGER, text_color="#fff",
+                                  width=90, height=30, corner_radius=8,
+                                  command=lambda e=ev: self._cancel_event(e)).pack(side="left")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # MY REGISTRATIONS (Volunteer)
+    # ─────────────────────────────────────────────────────────────────────────
+    def show_my_registrations(self):
+        self.clear()
+        root = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        root.pack(fill="both", expand=True)
+        top_nav(root, "📋  My Event Registrations", self.show_dashboard)
+
+        scroll = CTkScrollableFrame(root, fg_color=COLOR_BG)
+        scroll.pack(fill="both", expand=True, padx=28, pady=18)
+        inner = ctk.CTkFrame(scroll, fg_color="transparent")
+        inner.pack(fill="both", expand=True)
+
+        rows = run_select(
+            "SELECT e.*,n.name AS ngo_name, ep.joined_at, ep.checked_in, ep.hours_logged "
+            "FROM event_participants ep JOIN events e ON ep.event_id=e.id "
+            "JOIN ngos n ON e.ngo_id=n.id WHERE ep.user_id=%s ORDER BY ep.joined_at DESC",
+            (self.user["id"],)
+        )
+        total_h = sum(r["hours_logged"] for r in rows)
+        ctk.CTkLabel(inner, text=f"Total Events Registered: {len(rows)}   •   Total Volunteer Hours: {total_h:.1f}h",
+                     font=FONT_SUBHEADING, text_color=COLOR_TEXT).pack(anchor="w", pady=(0, 14))
+
+        if not rows:
+            c = card(inner, fill="x", pady=10)
+            ctk.CTkLabel(c, text="You haven't registered for any events yet.\nGo to 'Browse Events' to find one!",
+                         font=FONT_BODY, text_color=COLOR_TEXT_SEC, justify="center").pack(pady=24)
+            ctk.CTkButton(inner, text="Browse Events →", font=FONT_SUBHEADING,
+                          fg_color=COLOR_ACCENT, text_color="#fff",
+                          width=160, height=40, corner_radius=10,
+                          command=self.show_events).pack(pady=8)
+        else:
+            for r in rows:
+                bg = "#fef2f2" if r["cancelled"] else COLOR_CARD
+                c = ctk.CTkFrame(inner, fg_color=bg, corner_radius=12,
+                                 border_width=1, border_color=COLOR_BORDER)
+                c.pack(fill="x", pady=5)
+                f = ctk.CTkFrame(c, fg_color="transparent")
+                f.pack(fill="x", padx=16, pady=10)
+                ctk.CTkLabel(f, text=r["title"], font=FONT_SUBHEADING, text_color=COLOR_TEXT).pack(anchor="w")
+                ctk.CTkLabel(f, text=f"📅 {r['edate']}   📍 {r['location']}   🏢 {r['ngo_name']}",
+                             font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(anchor="w", pady=(3, 4))
+                sr = ctk.CTkFrame(f, fg_color="transparent")
+                sr.pack(anchor="w")
+                if r["cancelled"]:
+                    ctk.CTkLabel(sr, text="🚫 Event Cancelled by Organiser",
+                                 font=FONT_SMALL, text_color=COLOR_DANGER).pack(side="left")
+                else:
+                    ci = "✅ Checked In" if r["checked_in"] else "⏳ Not Yet Checked In"
+                    cc = COLOR_SUCCESS if r["checked_in"] else COLOR_WARNING
+                    ctk.CTkLabel(sr, text=ci, font=FONT_SMALL, text_color=cc).pack(side="left")
+                    if r["hours_logged"]:
+                        ctk.CTkLabel(sr, text=f"   ⏱ {r['hours_logged']:.1f}h logged",
+                                     font=FONT_SMALL, text_color=COLOR_ACCENT).pack(side="left")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # NGO DIRECTORY
+    # ─────────────────────────────────────────────────────────────────────────
+    def show_directory(self):
+        self.clear()
+        root = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        root.pack(fill="both", expand=True)
+        top_nav(root, "🏢  NGO Directory", self.show_dashboard)
+
+        fb = ctk.CTkFrame(root, fg_color=COLOR_CARD, height=68,
+                          border_width=1, border_color=COLOR_BORDER)
+        fb.pack(fill="x")
+        fb.pack_propagate(False)
+        fc = ctk.CTkFrame(fb, fg_color="transparent")
+        fc.pack(fill="both", expand=True, padx=24)
+
+        s_e  = ctk.CTkEntry(fc, placeholder_text="🔍  Search NGOs by name or description…",
+                            font=FONT_BODY, height=36, width=300, corner_radius=8)
+        s_e.pack(side="left", padx=(0, 8), pady=16)
+        cy_e = ctk.CTkEntry(fc, placeholder_text="📍 City", font=FONT_BODY,
+                            height=36, width=140, corner_radius=8)
+        cy_e.pack(side="left", padx=(0, 8), pady=16)
+        cat_cb = ctk.CTkComboBox(fc, values=["All Categories"] + CATEGORIES,
+                                 font=FONT_BODY, height=36, width=180,
+                                 corner_radius=8, state="readonly")
+        cat_cb.set("All Categories")
+        cat_cb.pack(side="left", padx=(0, 8), pady=16)
+
+        scroll = CTkScrollableFrame(root, fg_color=COLOR_BG)
+        scroll.pack(fill="both", expand=True, padx=28, pady=18)
+        inner = ctk.CTkFrame(scroll, fg_color="transparent")
+        inner.pack(fill="both", expand=True)
+
+        def refresh(srch="", cyf="", catf=""):
+            for w in inner.winfo_children():
+                w.destroy()
+            sql = ("SELECT n.*,"
+                   "(SELECT COUNT(*) FROM ngo_members m WHERE m.ngo_id=n.id) AS mcount,"
+                   "(SELECT COUNT(*) FROM events e WHERE e.ngo_id=n.id AND e.cancelled=0) AS ecount "
+                   "FROM ngos n WHERE 1=1")
+            args = []
+            if srch:
+                sql += " AND (n.name LIKE %s OR n.description LIKE %s)"
+                args += [f"%{srch}%", f"%{srch}%"]
+            if cyf:
+                sql += " AND n.city LIKE %s"
+                args.append(f"%{cyf}%")
+            if catf and catf != "All Categories":
+                sql += " AND n.type=%s"
+                args.append(catf)
+            sql += " ORDER BY n.name LIMIT 60"
+            ngos = run_select(sql, args)
+            ctk.CTkLabel(inner, text=f"{len(ngos)} organisation(s) found",
+                         font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(anchor="w", pady=(0, 6))
+            for ng in ngos:
+                self._ngo_card(inner, ng)
+
+        def do_s(): refresh(s_e.get().strip(), cy_e.get().strip(), cat_cb.get())
+        ctk.CTkButton(fc, text="Search", font=FONT_SUBHEADING, fg_color=COLOR_ACCENT,
+                      text_color="#fff", width=90, height=36, corner_radius=8,
+                      command=do_s).pack(side="left", pady=16)
+        ctk.CTkButton(fc, text="Clear", font=FONT_SMALL, fg_color=COLOR_LIGHT_BLUE,
+                      text_color=COLOR_ACCENT, width=70, height=36, corner_radius=8,
+                      command=refresh).pack(side="left", padx=6, pady=16)
+        refresh()
+
+    def _ngo_card(self, parent, ngo):
+        c = card(parent, fill="x", pady=7)
+        f = ctk.CTkFrame(c, fg_color="transparent")
+        f.pack(fill="x", padx=18, pady=14)
+
+        tr = ctk.CTkFrame(f, fg_color="transparent")
+        tr.pack(fill="x")
+        ctk.CTkLabel(tr, text=f"🏅  {ngo['name']}", font=FONT_SUBHEADING, text_color=COLOR_TEXT).pack(side="left")
+        ctk.CTkLabel(tr, text=f"  {ngo['type']} ", font=FONT_SMALL,
+                     text_color=COLOR_ACCENT, fg_color="#dbeafe", corner_radius=5).pack(side="left", padx=8)
+        ctk.CTkLabel(tr, text=f"👥 {ngo['mcount']} members   📅 {ngo['ecount']} events",
+                     font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(side="right")
+
+        ctk.CTkLabel(f, text=f"📍 {ngo['city']}   ✉ {ngo['email']}   📞 {ngo['phone']}",
+                     font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(anchor="w", pady=(4, 6))
+        desc = (ngo.get("description") or "")
+        ctk.CTkLabel(f, text=desc[:220] + ("…" if len(desc) > 220 else ""),
+                     font=FONT_BODY, text_color=COLOR_TEXT_SEC,
+                     wraplength=800, justify="left").pack(anchor="w", pady=(0, 10))
+        if ngo.get("website"):
+            ctk.CTkLabel(f, text=f"🌐 {ngo['website']}", font=FONT_SMALL,
+                         text_color=COLOR_ACCENT).pack(anchor="w", pady=(0, 8))
+
+        if self.user["role"] == "Volunteer":
+            br = ctk.CTkFrame(f, fg_color="transparent")
+            br.pack(anchor="e")
+            already = run_select("SELECT id FROM ngo_members WHERE ngo_id=%s AND user_id=%s",
+                                 (ngo["id"], self.user["id"]))
+            if already:
+                ctk.CTkLabel(br, text="✅ You're a member", font=FONT_SMALL,
+                             text_color=COLOR_SUCCESS).pack(side="left", padx=(0, 10))
+                ctk.CTkButton(br, text="Leave NGO", font=FONT_SMALL,
+                              fg_color=COLOR_DANGER, text_color="#fff",
+                              width=90, height=30, corner_radius=8,
+                              command=lambda nid=ngo["id"]: self._leave_ngo(nid)).pack(side="left")
+            else:
+                ctk.CTkButton(br, text="Join NGO", font=FONT_SMALL,
+                              fg_color=COLOR_SUCCESS, text_color="#fff",
+                              width=100, height=30, corner_radius=8,
+                              command=lambda ng=ngo: self._join_ngo(ng)).pack(side="left")
+
+    def _join_ngo(self, ngo):
+        if run_exec("INSERT INTO ngo_members (ngo_id,user_id) VALUES (%s,%s)",
+                    (ngo["id"], self.user["id"])):
+            nu = run_select("SELECT id FROM users WHERE email=%s", (ngo["email"],))
+            if nu:
+                notify(nu[0]["id"], f"🎉 {self.user['name']} joined your organisation as a member!", "join")
+            messagebox.showinfo("Joined! 🎉", f"You are now a member of '{ngo['name']}'!\n\nYou'll be notified when they post new events.")
+            self.show_directory()
+        else:
+            messagebox.showerror("Error", "Could not join. You may already be a member.")
+
+    def _leave_ngo(self, ngo_id):
+        if messagebox.askyesno("Leave NGO", "Are you sure you want to leave this NGO?"):
+            run_exec("DELETE FROM ngo_members WHERE ngo_id=%s AND user_id=%s",
+                     (ngo_id, self.user["id"]))
+            messagebox.showinfo("Left", "You have left the NGO.")
+            self.show_directory()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # MY NGOs (Volunteer)
+    # ─────────────────────────────────────────────────────────────────────────
+    def show_my_ngos(self):
+        self.clear()
+        root = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        root.pack(fill="both", expand=True)
+        top_nav(root, "🏅  My NGOs", self.show_dashboard)
+
+        scroll = CTkScrollableFrame(root, fg_color=COLOR_BG)
+        scroll.pack(fill="both", expand=True, padx=28, pady=18)
+        inner = ctk.CTkFrame(scroll, fg_color="transparent")
+        inner.pack(fill="both", expand=True)
+
+        rows = run_select(
+            "SELECT n.*, m.joined_at FROM ngo_members m JOIN ngos n ON m.ngo_id=n.id "
+            "WHERE m.user_id=%s ORDER BY m.joined_at DESC",
+            (self.user["id"],)
+        )
+        if not rows:
+            c = card(inner, fill="x", pady=10)
+            ctk.CTkLabel(c, text="You haven't joined any NGOs yet.\nExplore the NGO Directory to find organisations you care about.",
+                         font=FONT_BODY, text_color=COLOR_TEXT_SEC, justify="center").pack(pady=24)
+            ctk.CTkButton(inner, text="Go to NGO Directory →", font=FONT_SUBHEADING,
+                          fg_color=COLOR_ACCENT, text_color="#fff",
+                          width=190, height=40, corner_radius=10,
+                          command=self.show_directory).pack(pady=8)
+        else:
+            for ng in rows:
+                c = card(inner, fill="x", pady=6)
+                f = ctk.CTkFrame(c, fg_color="transparent")
+                f.pack(fill="x", padx=16, pady=12)
+                ctk.CTkLabel(f, text=f"🏅  {ng['name']}", font=FONT_SUBHEADING, text_color=COLOR_TEXT).pack(anchor="w")
+                ctk.CTkLabel(f, text=f"📍 {ng['city']}   {ng['type']}   Joined: {str(ng['joined_at'])[:10]}",
+                             font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(anchor="w", pady=(3, 0))
+                ctk.CTkButton(f, text="Leave NGO", font=FONT_SMALL,
+                              fg_color=COLOR_DANGER, text_color="#fff",
+                              width=100, height=28, corner_radius=8,
+                              command=lambda nid=ng["id"]: self._leave_ngo(nid)).pack(anchor="e", pady=(8, 0))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # NOTIFICATIONS
+    # ─────────────────────────────────────────────────────────────────────────
+    def show_notifications(self):
+        self.clear()
+        root = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        root.pack(fill="both", expand=True)
+        top_nav(root, "🔔  Notifications", self.show_dashboard)
+
+        run_exec("UPDATE notifications SET seen=1 WHERE user_id=%s", (self.user["id"],))
+
+        scroll = CTkScrollableFrame(root, fg_color=COLOR_BG)
+        scroll.pack(fill="both", expand=True, padx=28, pady=18)
+        inner = ctk.CTkFrame(scroll, fg_color="transparent")
+        inner.pack(fill="both", expand=True)
+
+        notifs = run_select(
+            "SELECT * FROM notifications WHERE user_id=%s ORDER BY ts DESC LIMIT 80",
+            (self.user["id"],)
+        )
+        if not notifs:
+            c = card(inner, fill="x", pady=10)
+            ctk.CTkLabel(c, text="No notifications yet.\nStart joining events or NGOs to receive updates here!",
+                         font=FONT_BODY, text_color=COLOR_TEXT_SEC, justify="center").pack(pady=30)
+        else:
+            ctk.CTkButton(inner, text="🗑 Clear All Notifications", font=FONT_SMALL,
+                          fg_color=COLOR_DANGER, text_color="#fff",
+                          width=190, height=32, corner_radius=8,
+                          command=lambda: [
+                              run_exec("DELETE FROM notifications WHERE user_id=%s", (self.user["id"],)),
+                              self.show_notifications()
+                          ]).pack(anchor="e", pady=(0, 10))
+            for n in notifs:
+                bg = "#eff6ff" if not n["seen"] else COLOR_CARD
+                c = ctk.CTkFrame(inner, fg_color=bg, corner_radius=10,
+                                 border_width=1, border_color=COLOR_BORDER)
+                c.pack(fill="x", pady=4)
+                f = ctk.CTkFrame(c, fg_color="transparent")
+                f.pack(fill="x", padx=14, pady=10)
+                ctk.CTkLabel(f, text=n["text"], font=FONT_BODY, text_color=COLOR_TEXT,
+                             wraplength=900, justify="left").pack(anchor="w")
+                ctk.CTkLabel(f, text=str(n["ts"])[:16], font=FONT_SMALL,
+                             text_color=COLOR_TEXT_SEC).pack(anchor="e")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PROFILE
+    # ─────────────────────────────────────────────────────────────────────────
+    def show_profile(self):
+        self.clear()
+        root = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        root.pack(fill="both", expand=True)
+        top_nav(root, "👤  My Profile", self.show_dashboard)
+
+        scroll = CTkScrollableFrame(root, fg_color=COLOR_BG)
+        scroll.pack(fill="both", expand=True, padx=28, pady=18)
+
+        # Profile card
+        pc = card(scroll, fill="x", padx=120, pady=10)
+        pci = ctk.CTkFrame(pc, fg_color="transparent")
+        pci.pack(fill="x", padx=30, pady=22)
+        ctk.CTkLabel(pci, text="👤", font=("Segoe UI Emoji", 56), text_color=COLOR_ACCENT).pack()
+        ctk.CTkLabel(pci, text=self.user["name"], font=FONT_TITLE, text_color=COLOR_TEXT).pack(pady=(4, 0))
+        ctk.CTkLabel(pci, text=f"{self.user['role']}   •   📍 {self.user['city']}",
+                     font=FONT_BODY, text_color=COLOR_TEXT_SEC).pack()
+
+        divider(pci)
+        for lbl_t, val_t in [("✉  Email", self.user["email"]),
+                              ("📞  Phone", self.user.get("phone") or "—"),
+                              ("📍  City",  self.user.get("city") or "—"),
+                              ("🏷  Role",  self.user["role"]),
+                              ("🛠  Skills", self.user.get("skills") or "—")]:
+            rr = ctk.CTkFrame(pci, fg_color="#f8fafc", corner_radius=8)
+            rr.pack(fill="x", pady=3)
+            rf = ctk.CTkFrame(rr, fg_color="transparent")
+            rf.pack(fill="x", padx=14, pady=8)
+            ctk.CTkLabel(rf, text=lbl_t, font=FONT_SUBHEADING, text_color=COLOR_TEXT_SEC, width=110).pack(side="left")
+            ctk.CTkLabel(rf, text=val_t, font=FONT_BODY, text_color=COLOR_TEXT).pack(side="left")
+
+        # Edit form
+        section_title(scroll, "✏️  Edit Your Details")
+        ec = card(scroll, fill="x", padx=120, pady=6)
+        ef = ctk.CTkFrame(ec, fg_color="transparent")
+        ef.pack(fill="x", padx=30, pady=22)
+
+        def prefill(w, v): w.insert(0, v or "")
+
+        en  = field(ef, "Full Name", "Your name")
+        prefill(en, self.user["name"])
+        ep  = field(ef, "Phone (10 digits)", "Phone number")
+        prefill(ep, self.user.get("phone"))
+        ec2 = field(ef, "City", "Your city")
+        prefill(ec2, self.user.get("city"))
+        esk = field(ef, "Skills / Interests (comma separated)", "e.g. Teaching, Photography")
+        prefill(esk, self.user.get("skills"))
+
+        ctk.CTkLabel(ef, text="Change Password  (leave blank to keep current)",
+                     font=FONT_SMALL, text_color=COLOR_TEXT_SEC).pack(anchor="w", pady=(6, 3))
+        npw = ctk.CTkEntry(ef, placeholder_text="New password (min 6 chars)",
+                           show="*", font=FONT_BODY, height=38, corner_radius=8)
+        npw.pack(fill="x", pady=(0, 10))
+
+        err = ctk.CTkLabel(ef, text="", font=FONT_SMALL, text_color=COLOR_DANGER)
+        err.pack()
+
+        def save():
+            n  = en.get().strip(); ph = ep.get().strip()
+            ct = ec2.get().strip(); sk = esk.get().strip()
+            np_ = npw.get().strip()
+            if not all([n, ph, ct]):
+                err.configure(text="Name, phone, and city are required."); return
+            if len(ph) != 10 or not ph.isdigit():
+                err.configure(text="Phone must be exactly 10 digits."); return
+            if np_ and len(np_) < 6:
+                err.configure(text="Password must be at least 6 characters."); return
+
+            if np_:
+                run_exec("UPDATE users SET name=%s,phone=%s,city=%s,skills=%s,password=%s WHERE id=%s",
+                         (n, ph, ct, sk, hash_pw(np_), self.user["id"]))
+            else:
+                run_exec("UPDATE users SET name=%s,phone=%s,city=%s,skills=%s WHERE id=%s",
+                         (n, ph, ct, sk, self.user["id"]))
+
+            updated = run_select("SELECT * FROM users WHERE id=%s", (self.user["id"],))
+            if updated: self.user = updated[0]
+            messagebox.showinfo("Saved ✓", "Your profile has been updated!")
+            self.show_profile()
+
+        bf = ctk.CTkFrame(ef, fg_color="transparent")
+        bf.pack(fill="x", pady=(10, 0))
+        ctk.CTkButton(bf, text="Save Changes", font=FONT_SUBHEADING,
+                      fg_color=COLOR_SUCCESS, text_color="#fff",
+                      width=150, height=42, corner_radius=10, command=save).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(bf, text="Sign Out", font=FONT_SUBHEADING,
+                      fg_color=COLOR_DANGER, text_color="#fff",
+                      width=110, height=42, corner_radius=10,
+                      command=self.do_logout).pack(side="left")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # LOGOUT
+    # ─────────────────────────────────────────────────────────────────────────
+    def do_logout(self):
+        if messagebox.askyesno("Sign Out", "Are you sure you want to sign out?"):
+            self.user = None
+            self.show_landing()
+
+
+# =============================================================================
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()
